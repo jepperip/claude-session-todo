@@ -669,11 +669,10 @@ export const register: Register = (on, options) => {
         )}
         {lists.map((list, index) => {
           const done = list.items.filter(item => item.status === 'done').length
-          const isActive = list.name === todo.active
           return (
             <Box key={`list:${list.name}`} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
               <Box flexDirection="row" justifyContent="space-between" gap={2}>
-                <Text bold={isActive} dimColor={!isActive} color={isActive ? theme.title : undefined} wrap="wrap">
+                <Text bold color={theme.title} wrap="wrap">
                   {list.title}
                 </Text>
                 <Box flexDirection="row" gap={1} flexShrink={0}>
