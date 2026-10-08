@@ -527,11 +527,17 @@ export const register: Register = (on, options) => {
         ? 'TODO: nothing in progress'
         : `TODO: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
 
+    const isIdle = current.length === 0
     return (
       <Box flexDirection="row" justifyContent="space-between" gap={2}>
-        <Text wrap="truncate-end" color={current.length === 0 ? undefined : theme.status.in_progress} dimColor={current.length === 0}>
-          {now}
-        </Text>
+        <Box flexDirection="row" gap={1} minWidth={0}>
+          <Text bold color={isIdle ? undefined : theme.status.in_progress} dimColor={isIdle}>
+            {isIdle ? GLYPH.pending : GLYPH.in_progress}
+          </Text>
+          <Text wrap="truncate-end" color={isIdle ? undefined : theme.status.in_progress} dimColor={isIdle}>
+            {now}
+          </Text>
+        </Box>
         <Box flexDirection="row" gap={1} flexShrink={0}>
           <Text color={theme.accent} dimColor={!theme.accent}>{`${done}/${items.length}`}</Text>
           <Button key="open-pane" label="All items" onPress={() => void ensurePane($)} />
