@@ -566,17 +566,22 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const done = items.filter(item => item.status === 'done').length
     const current = items.filter(item => item.status === 'in_progress')
+    // With nothing in progress the band names the next pending item, so a freshly added item
+    // shows up at once; with nothing pending either, it says so.
+    const upcoming = current.length === 0 ? items.find(item => item.status === 'pending') : undefined
     const now =
-      current.length === 0
-        ? 'TODO: nothing in progress'
-        : `TODO: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
+      current.length > 0
+        ? `TODO: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
+        : upcoming
+          ? `TODO: ${upcoming.text}`
+          : 'TODO: nothing left'
 
-    const isIdle = current.length === 0
+    const isIdle = current.length === 0 && upcoming === undefined
     // An item that just went from in progress to done holds the band for a moment, ticked, before
     // the next item takes its place.
     const finished = await read($, justDone)
-    const glyph = finished ? GLYPH.done : isIdle ? GLYPH.pending : GLYPH.in_progress
-    const glyphColor = finished ? theme.status.done : isIdle ? undefined : theme.status.in_progress
+    const glyph = finished ? GLYPH.done : current.length > 0 ? GLYPH.in_progress : GLYPH.pending
+    const glyphColor = finished ? theme.status.done : current.length > 0 ? theme.status.in_progress : undefined
     const label = finished ? `DONE: ${finished.text}` : now
     return (
       <Box flexDirection="row" justifyContent="space-between" gap={2}>
