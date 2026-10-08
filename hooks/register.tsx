@@ -20,6 +20,8 @@ const GLYPH: Record<TodoStatus, string> = {
   blocked: '[!]',
 }
 
+const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  · click a glyph to cycle`
+
 type TodoToolInput = {
   action: 'write' | 'add' | 'update' | 'remove' | 'read' | 'clear'
   title?: string
@@ -313,6 +315,9 @@ export const register: Register = on => {
             <Text dimColor wrap="wrap">{`now: ${current.text}`}</Text>
           </Box>
         )}
+        <Box marginTop={1}>
+          <Text dimColor wrap="wrap">{LEGEND}</Text>
+        </Box>
       </Box>
     )
   })
