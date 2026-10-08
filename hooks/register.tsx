@@ -293,9 +293,18 @@ function storeKey(sessionId: string): string {
   return `board:${sessionId}`
 }
 
+/**
+ * Pins the status line only while the pane is not on screen: the host draws every pinned
+ * line with a warning glyph, and beside an open pane the line would only repeat it.
+ */
+async function refreshStatus($: EngineInterface, todo: TodoBoard): Promise<void> {
+  const isPaneShown = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
+  $.ui.status(isPaneShown ? undefined : statusLine(todo))
+}
+
 async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard): Promise<TodoBoard> {
   const todo = await update($, board, change)
-  $.ui.status(statusLine(todo))
+  await refreshStatus($, todo)
   await $.store.set(storeKey(await $.session.id()), todo)
   return todo
 }
@@ -303,6 +312,7 @@ async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard
 async function ensurePane($: EngineInterface): Promise<void> {
   const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
   if (!isUp) await $.ui.open({ id: PANE, title: 'Todo' })
+  await refreshStatus($, await read($, board))
 }
 
 function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
@@ -455,12 +465,9 @@ export const register: Register = (on, options) => {
     })
 
     const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
-    if (saved && Array.isArray(saved.lists)) {
-      await update($, board, () => saved)
-      $.ui.status(statusLine(saved))
-    }
+    if (saved && Array.isArray(saved.lists)) await update($, board, () => saved)
 
-    void $.ui.open({ id: PANE, title: 'Todo' })
+    void $.ui.open({ id: PANE, title: 'Todo' }).then(async () => refreshStatus($, await read($, board)))
     return next(e)
   })
 
@@ -470,6 +477,12 @@ export const register: Register = (on, options) => {
       $.ui.status(undefined)
     }
     return next(e)
+  })
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const closed = await next(e)
+    if (e.origin.kind !== 'unload') $.ui.status(statusLine(await read($, board)))
+    return closed
   })
 
   on('prompt.compose', async ($, e, next) => {
