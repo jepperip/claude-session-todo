@@ -1,0 +1,5 @@
+{
+  "name": "jepperip",
+  "owner": { "name": "Jesper Sahlin" },
+  "plugins": [{ "name": "session-todo", "source": "./" }]
+}
