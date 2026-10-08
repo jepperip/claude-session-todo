@@ -290,34 +290,21 @@ function render(todo: TodoBoard): string {
   return lines.join('\n')
 }
 
-function statusLine(todo: TodoBoard): string | undefined {
-  const items = allItems(todo)
-  if (items.length === 0) return undefined
-  const done = items.filter(item => item.status === 'done').length
-  const current = items.filter(item => item.status === 'in_progress')
-  const now =
-    current.length === 0
-      ? ''
-      : ` · now: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
-  return `Todo ${done}/${items.length}${now}`
-}
-
 function storeKey(sessionId: string): string {
   return `board:${sessionId}`
 }
 
-/**
- * Pins the status line only while the pane is not on screen: the host draws every pinned
- * line with a warning glyph, and beside an open pane the line would only repeat it.
- */
-async function refreshStatus($: EngineInterface, todo: TodoBoard): Promise<void> {
-  const isPaneShown = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
-  $.ui.status(isPaneShown ? undefined : statusLine(todo))
+async function isPaneShown($: EngineInterface): Promise<boolean> {
+  return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
+}
+
+/** The band above the prompt depends on whether the pane is on screen, which no state read tracks. */
+function redraw($: EngineInterface): void {
+  $.ui.invalidate('ui.render')
 }
 
 async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard): Promise<TodoBoard> {
   const todo = await update($, board, change)
-  await refreshStatus($, todo)
   await $.store.set(storeKey(await $.session.id()), todo)
   return todo
 }
@@ -347,7 +334,7 @@ function setTheme($: EngineInterface, name: string): Promise<string | undefined>
 async function ensurePane($: EngineInterface): Promise<void> {
   const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
   if (!isUp) await $.ui.open({ id: PANE, title: 'Todo' })
-  await refreshStatus($, await read($, board))
+  redraw($)
 }
 
 function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
@@ -487,11 +474,12 @@ function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
   return items.find(item => item.id === arg)
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}> | compact [on|off]]`
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [on|off]]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
   const isCompact = options.compact === true
+  const hasBand = options.band !== false
   const theme = THEMES[themeKey] as Theme
 
   on('session.start', async ($, e, next) => {
@@ -503,29 +491,53 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>, compact [on|off]',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name> | compact [on|off]]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>, compact [on|off], band [on|off]',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name> | compact [on|off] | band [on|off]]',
     })
 
     const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
     if (saved && Array.isArray(saved.lists)) await update($, board, () => saved)
 
-    void $.ui.open({ id: PANE, title: 'Todo' }).then(async () => refreshStatus($, await read($, board)))
+    void $.ui.open({ id: PANE, title: 'Todo' }).then(() => redraw($))
     return next(e)
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') {
-      await update($, board, () => EMPTY)
-      $.ui.status(undefined)
-    }
+    if (e.reason === 'clear') await update($, board, () => EMPTY)
     return next(e)
   })
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const closed = await next(e)
-    if (e.origin.kind !== 'unload') $.ui.status(statusLine(await read($, board)))
+    if (e.origin.kind !== 'unload') redraw($)
     return closed
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (!hasBand || e.props.hasSurvey) return next(e)
+    const todo = await read($, board)
+    const items = allItems(todo)
+    if (items.length === 0 || (await isPaneShown($))) return next(e)
+
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const done = items.filter(item => item.status === 'done').length
+    const current = items.filter(item => item.status === 'in_progress')
+    const now =
+      current.length === 0
+        ? 'nothing in progress'
+        : `now: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
+
+    return (
+      <Box flexDirection="row" justifyContent="space-between" gap={2}>
+        <Text wrap="truncate-end" color={current.length === 0 ? undefined : theme.status.in_progress} dimColor={current.length === 0}>
+          {now}
+        </Text>
+        <Box flexDirection="row" gap={1} flexShrink={0}>
+          <Text color={theme.accent} dimColor={!theme.accent}>{`${done}/${items.length}`}</Text>
+          <Button key="open-pane" label="Todo" onPress={() => void ensurePane($)} />
+        </Box>
+      </Box>
+    )
   })
 
   on('prompt.compose', async ($, e, next) => {
@@ -589,10 +601,12 @@ export const register: Register = (on, options) => {
       if (typeof outcome === 'string') return { text: outcome }
       return { text: render(await commit($, () => outcome)) }
     }
-    if (verb === 'compact') {
-      const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !isCompact
-      const failed = await setOption($, 'compact', wanted)
-      return { text: failed ? `Could not set compact: ${failed}` : `Compact rows ${wanted ? 'on' : 'off'}.` }
+    if (verb === 'compact' || verb === 'band') {
+      const current = verb === 'compact' ? isCompact : hasBand
+      const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !current
+      const failed = await setOption($, verb, wanted)
+      const label = verb === 'compact' ? 'Compact rows' : 'Band above the prompt'
+      return { text: failed ? `Could not set ${verb}: ${failed}` : `${label} ${wanted ? 'on' : 'off'}.` }
     }
     if (verb === 'theme') {
       const name = rest[0]
@@ -643,6 +657,17 @@ export const register: Register = (on, options) => {
             onPress={() =>
               void setOption($, 'compact', !isCompact).then(failed => {
                 if (failed) $.ui.toast(`Could not set compact: ${failed}`)
+              })
+            }
+          />
+          <Button
+            plain
+            key="band"
+            label={`${hasBand ? GLYPH.done : GLYPH.pending} band`}
+            dimColor={!hasBand}
+            onPress={() =>
+              void setOption($, 'band', !hasBand).then(failed => {
+                if (failed) $.ui.toast(`Could not set band: ${failed}`)
               })
             }
           />
