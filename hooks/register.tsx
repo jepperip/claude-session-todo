@@ -524,8 +524,8 @@ export const register: Register = (on, options) => {
     const current = items.filter(item => item.status === 'in_progress')
     const now =
       current.length === 0
-        ? 'nothing in progress'
-        : `now: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
+        ? 'TODO: nothing in progress'
+        : `TODO: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
 
     return (
       <Box flexDirection="row" justifyContent="space-between" gap={2}>
