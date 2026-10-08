@@ -51,3 +51,5 @@ types/index.d.ts                the state contract (what the pane draws from)
 ## Status
 
 Early access API: Claude Code's function-hook plugin API moves between releases, so a newer engine may need small changes here. Written against Claude Code 2.1.293.
+
+Works in a terminal and in the Claude desktop app. In Claude Code for VS Code (extension 2.1.292 at the time of writing) the mod loads and the `todo` tool, the prompt section and `/todo` work, but the extension's webview does not draw plugin panes or bands yet, so there is no pane, band or settings row there; `/todo` prints the board as text instead. Nothing here has to change for that: the engine already treats VS Code as a drawing surface, and the pane appears once an extension release draws it.
