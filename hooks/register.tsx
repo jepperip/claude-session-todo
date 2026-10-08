@@ -22,6 +22,40 @@ const GLYPH: Record<TodoStatus, string> = {
 
 const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  · click a glyph to cycle`
 
+/** The bar's segments left to right: what is finished, what is moving, what is stuck, what is left. */
+const BAR_ORDER: readonly TodoStatus[] = ['done', 'in_progress', 'blocked', 'pending']
+const BAR_COLOR: Record<TodoStatus, string | undefined> = {
+  done: 'green',
+  in_progress: 'yellow',
+  blocked: 'red',
+  pending: undefined,
+}
+const BAR_FILL = '█'
+const BAR_REST = '░'
+
+type BarSegment = { status: TodoStatus; cells: number }
+
+/** Splits `width` cells between the statuses in proportion, rounding on the running total so the cells always add up. */
+function barSegments(items: readonly TodoItem[], width: number): BarSegment[] {
+  const total = items.length
+  if (total === 0) return [{ status: 'pending', cells: width }]
+  const segments: BarSegment[] = []
+  let counted = 0
+  let drawn = 0
+  for (const status of BAR_ORDER) {
+    counted += items.filter(item => item.status === status).length
+    const edge = Math.round((counted / total) * width)
+    segments.push({ status, cells: edge - drawn })
+    drawn = edge
+  }
+  return segments
+}
+
+function percentDone(items: readonly TodoItem[]): number {
+  if (items.length === 0) return 0
+  return Math.round((items.filter(item => item.status === 'done').length / items.length) * 100)
+}
+
 type TodoToolInput = {
   action: 'write' | 'add' | 'update' | 'remove' | 'read' | 'clear' | 'drop' | 'focus'
   list?: string
@@ -375,6 +409,8 @@ export const register: Register = on => {
     const toggle = (item: TodoItem) => () =>
       void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })))
 
+    const barWidth = Math.max(12, Math.min(40, e.props.bodyColumns - 10))
+
     let n = 0
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -393,6 +429,24 @@ export const register: Register = on => {
                   {list.title}
                 </Text>
                 <Text dimColor>{list.items.length === 0 ? 'empty' : `${done}/${list.items.length} done`}</Text>
+              </Box>
+              <Box flexDirection="row" gap={1} marginBottom={list.items.length === 0 ? 0 : 1}>
+                <Box flexDirection="row">
+                  {barSegments(list.items, barWidth)
+                    .filter(segment => segment.cells > 0)
+                    .map(segment => (
+                      <Text
+                        key={`bar:${list.name}:${segment.status}`}
+                        color={BAR_COLOR[segment.status]}
+                        dimColor={segment.status === 'pending'}
+                      >
+                        {(segment.status === 'pending' ? BAR_REST : BAR_FILL).repeat(segment.cells)}
+                      </Text>
+                    ))}
+                </Box>
+                <Text bold={done === list.items.length && done > 0} dimColor={done !== list.items.length}>
+                  {`${percentDone(list.items)}%`}
+                </Text>
               </Box>
               {list.items.map(item => {
                 n++
