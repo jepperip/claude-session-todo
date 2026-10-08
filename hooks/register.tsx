@@ -28,8 +28,13 @@ const GLYPH: Record<TodoStatus, string> = {
 
 /** Follows the text of an item the agent does itself, so the person's own steps stand out by its absence. */
 const AGENT_MARK = '✱'
+/** Follows the text of an item the person does. */
+const USER_MARK = '♟'
+/** The marks' own colours, muted so they read as badges rather than status: orange for the agent, yellow for the person. */
+const AGENT_MARK_COLOR = '#c97b4a'
+const USER_MARK_COLOR = '#d4b24c'
 
-const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  ${AGENT_MARK} Claude's  · click a glyph to cycle`
+const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  ${AGENT_MARK} Claude's  ${USER_MARK} yours  · click a glyph to cycle`
 
 /** What a theme paints: the colour of each status, the accents, and the bar's two glyphs. */
 type Theme = {
@@ -295,7 +300,7 @@ function render(todo: TodoBoard): string {
     for (const item of list.items) {
       n++
       const glyph = GLYPH[item.status].replace(' ', ' ')
-      const owner = item.owner === 'user' ? ' [user]' : ''
+      const owner = item.owner === 'user' ? ' [yours]' : ''
       lines.push(`  ${glyph} ${n}. ${item.text} (${item.id})${owner}${item.note ? ` — ${item.note}` : ''}`)
     }
   }
@@ -804,7 +809,10 @@ export const register: Register = (on, options) => {
                         strikethrough={item.status === 'done'}
                         color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
                       >
-                        {`${n}. ${item.text}${item.owner === 'user' ? '' : ` ${AGENT_MARK}`}`}
+                        {`${n}. ${item.text}`}
+                      </Text>
+                      <Text color={item.owner === 'user' ? USER_MARK_COLOR : AGENT_MARK_COLOR} dimColor={item.status === 'done'}>
+                        {item.owner === 'user' ? USER_MARK : AGENT_MARK}
                       </Text>
                     </Box>
                     {item.note && (
