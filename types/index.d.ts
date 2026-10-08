@@ -33,6 +33,10 @@ declare module 'claude-code' {
       board: TodoBoard
       /** Whether the pane's settings row (the theme selector) is unfolded. */
       settingsOpen: boolean
+      /** The item that just went from in progress to done, shown on the band for a moment; null otherwise. */
+      justDone: { id: string; text: string } | null
+      /** Whether the pane has already opened on its own this session; it does so once at most. */
+      paneAutoOpened: boolean
     }
   }
 }

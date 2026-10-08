@@ -11,6 +11,8 @@ const EMPTY: TodoBoard = { lists: [], nextId: 1 }
 
 const board = atom({ plugin: 'session-todo', key: 'board' } as const, EMPTY)
 const settingsOpen = atom({ plugin: 'session-todo', key: 'settingsOpen' } as const, false)
+const justDone = atom({ plugin: 'session-todo', key: 'justDone' } as const, null)
+const paneAutoOpened = atom({ plugin: 'session-todo', key: 'paneAutoOpened' } as const, false)
 const THEME_FIELD = 'theme'
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'done', 'blocked']
@@ -303,9 +305,22 @@ function redraw($: EngineInterface): void {
   $.ui.invalidate('ui.render')
 }
 
+/** How long the band shows an item that just finished before moving on to the next one. */
+const JUST_DONE_MS = 2000
+
 async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard): Promise<TodoBoard> {
+  const before = allItems(await read($, board))
   const todo = await update($, board, change)
   await $.store.set(storeKey(await $.session.id()), todo)
+
+  const finished = allItems(todo).find(item => {
+    const was = before.find(one => one.id === item.id)
+    return was?.status === 'in_progress' && item.status === 'done'
+  })
+  if (finished) {
+    await update($, justDone, () => ({ id: finished.id, text: finished.text }))
+    $.clock.after(JUST_DONE_MS, () => void update($, justDone, held => (held?.id === finished.id ? null : held)))
+  }
   return todo
 }
 
@@ -331,10 +346,21 @@ function setTheme($: EngineInterface, name: string): Promise<string | undefined>
   return setOption($, THEME_FIELD, name)
 }
 
-async function ensurePane($: EngineInterface): Promise<void> {
+/** Opens the pane because the person asked: a command, a button on the band. */
+async function openPane($: EngineInterface): Promise<void> {
   const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
   if (!isUp) await $.ui.open({ id: PANE, title: 'Todo' })
+  await update($, paneAutoOpened, () => true)
   redraw($)
+}
+
+/**
+ * Opens the pane on the agent's behalf, once per session at most: the first write brings it up,
+ * and after that a pane the person closed stays closed, with the band standing in for it.
+ */
+async function autoOpenPane($: EngineInterface): Promise<void> {
+  if (await read($, paneAutoOpened)) return
+  await openPane($)
 }
 
 function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
@@ -500,9 +526,7 @@ export const register: Register = (on, options) => {
 
     // The pane opens on its own only when there is something to show: a restored board with
     // items. Otherwise the first write (the agent's or /todo add) opens it.
-    if (saved && Array.isArray(saved.lists) && allItems(saved).length > 0) {
-      void $.ui.open({ id: PANE, title: 'Todo' }).then(() => redraw($))
-    }
+    if (saved && Array.isArray(saved.lists) && allItems(saved).length > 0) void autoOpenPane($)
     return next(e)
   })
 
@@ -532,23 +556,29 @@ export const register: Register = (on, options) => {
         : `TODO: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
 
     const isIdle = current.length === 0
+    // An item that just went from in progress to done holds the band for a moment, ticked, before
+    // the next item takes its place.
+    const finished = await read($, justDone)
+    const glyph = finished ? GLYPH.done : isIdle ? GLYPH.pending : GLYPH.in_progress
+    const glyphColor = finished ? theme.status.done : isIdle ? undefined : theme.status.in_progress
+    const label = finished ? `DONE: ${finished.text}` : now
     return (
       <Box flexDirection="row" justifyContent="space-between" gap={2}>
         <Box flexDirection="row" gap={1} minWidth={0}>
-          <Text bold color={isIdle ? undefined : theme.status.in_progress} dimColor={isIdle}>
-            {isIdle ? GLYPH.pending : GLYPH.in_progress}
+          <Text bold color={glyphColor} dimColor={isIdle && !finished}>
+            {glyph}
           </Text>
-          {isIdle ? (
+          {isIdle && !finished ? (
             <Text wrap="truncate-end" dimColor>
-              {now}
+              {label}
             </Text>
           ) : (
-            <Button plain key="open-current" label={now} onPress={() => void ensurePane($)} />
+            <Button plain key="open-current" label={label} onPress={() => void openPane($)} />
           )}
         </Box>
         <Box flexDirection="row" gap={1} flexShrink={0}>
           <Text color={theme.accent} dimColor={!theme.accent}>{`${done}/${items.length}`}</Text>
-          <Button key="open-pane" label="All items" onPress={() => void ensurePane($)} />
+          <Button key="open-pane" label="All items" onPress={() => void openPane($)} />
         </Box>
       </Box>
     )
@@ -566,7 +596,7 @@ export const register: Register = (on, options) => {
     const outcome = applyTool(before, { ...input, about: fitted.about })
     if (typeof outcome === 'string') return { deny: `todo: ${outcome}` }
     const after = outcome === before ? before : await commit($, () => outcome)
-    if (input.action !== 'read') await ensurePane($)
+    if (input.action !== 'read') await autoOpenPane($)
     return { result: fitted.note ? `${render(after)}\n(${fitted.note})` : render(after) }
   })
 
@@ -575,7 +605,7 @@ export const register: Register = (on, options) => {
     const todo = await read($, board)
 
     if (verb === '') {
-      await ensurePane($)
+      await openPane($)
       return { text: render(todo) }
     }
     if (verb === 'add') {
@@ -585,7 +615,7 @@ export const register: Register = (on, options) => {
       const outcome = applyTool(todo, { action: 'add', list, text })
       if (typeof outcome === 'string') return { text: outcome }
       const after = await commit($, () => outcome)
-      await ensurePane($)
+      await openPane($)
       return { text: render(after) }
     }
     if (verb === 'clear' || verb === 'drop' || verb === 'focus') {
