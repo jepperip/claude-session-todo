@@ -162,7 +162,7 @@ const TOOL_DESCRIPTION = [
   'The todo lists the user watches in the Todo side pane. They are their view of the plan, so keep them current without being asked.',
   'Lists are named (default "main"); items are addressed by id, unique across lists.',
   '- write: replace one list with its steps (list, title, items, optional about). Do this before work with three or more steps, or that spans more than one turn, starts. The first list written becomes the active one, drawn first; focus switches it.',
-  `- about (optional, at most ${ABOUT_MAX} characters): one short sentence under the title saying what the list is for or what done looks like, so the user still knows a day later. Not a summary of the items. Set it with write and leave it; describe changes it later.`,
+  `- about (optional, one line of at most ${ABOUT_MAX} characters; a longer one is cut with an ellipsis): one short sentence under the title saying what the list is for or what done looks like, so the user still knows a day later. Not a summary of the items. Set it with write and leave it; describe changes it later.`,
   '- add / update / remove: one item. Mark the step you begin in_progress (prefer one at a time, several when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the user.',
   '- read: every list as the pane shows it, with ids. Call it after a context compaction.',
   '- clear: empty one list (list) or all. drop: remove a list. focus: make a list the active one. describe: set or clear a list\'s about (list, about).',
@@ -181,7 +181,7 @@ const TOOL_SCHEMA = {
     title: { type: 'string', description: 'A heading for the list (write only); defaults to the name.' },
     about: {
       type: 'string',
-      description: `One short line under the title saying what the list is for (write, describe). Optional; at most ${ABOUT_MAX} characters. Empty clears it.`,
+      description: `One short line under the title saying what the list is for (write, describe). Optional; at most ${ABOUT_MAX} characters, a longer one is cut. Empty clears it.`,
     },
     items: {
       type: 'array',
@@ -340,7 +340,6 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
         items.push(item)
       }
       const about = aboutOf(input.about, existing?.about)
-      if (typeof about === 'object') return about.error
       const list: TodoList = { name: existing?.name ?? name, title: input.title ?? existing?.title ?? name, items }
       if (about) list.about = about
       const lists = existing ? todo.lists.map(one => (one === existing ? list : one)) : [...todo.lists, list]
@@ -409,7 +408,6 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
       const target = targetList(todo, input.list)
       if (!target) return `no list named ${input.list ?? '(none)'}`
       const about = aboutOf(input.about, undefined)
-      if (typeof about === 'object') return about.error
       return {
         ...todo,
         lists: todo.lists.map(list => {
@@ -426,15 +424,24 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
   }
 }
 
-/**
- * The `about` a call leaves on a list: the given one trimmed, the current one when none is given,
- * or an error when the given one runs past the cap.
- */
-function aboutOf(given: string | undefined, current: string | undefined): string | undefined | { error: string } {
+/** The `about` a call leaves on a list: the given one trimmed, or the current one when none is given. */
+function aboutOf(given: string | undefined, current: string | undefined): string | undefined {
   if (given === undefined) return current
-  const about = given.trim().replace(/\s+/g, ' ')
-  if (about.length > ABOUT_MAX) return { error: `about is ${about.length} characters; keep it to ${ABOUT_MAX} or fewer` }
-  return about || undefined
+  return given.trim().replace(/\s+/g, ' ') || undefined
+}
+
+/**
+ * Cuts an `about` past the cap at a word boundary, with an ellipsis, and says so: the field is
+ * optional, so a long one must never fail the call that carries it.
+ */
+function fitAbout(about: string | undefined): { about: string | undefined; note?: string } {
+  if (about === undefined) return { about }
+  const whole = about.trim().replace(/\s+/g, ' ')
+  if (whole.length <= ABOUT_MAX) return { about: whole }
+  const room = whole.slice(0, ABOUT_MAX - 1)
+  const atWord = room.lastIndexOf(' ')
+  const cut = `${(atWord > ABOUT_MAX / 2 ? room.slice(0, atWord) : room).trimEnd()}…`
+  return { about: cut, note: `about was ${whole.length} characters and is cut to ${ABOUT_MAX}: "${cut}"` }
 }
 
 /** An item by its number in the pane (counted across lists in drawn order) or by id. */
@@ -493,11 +500,12 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: TOOL }, async ($, e) => {
     const input = e as unknown as TodoToolInput
     const before = await read($, board)
-    const outcome = applyTool(before, input)
+    const fitted = fitAbout(input.about)
+    const outcome = applyTool(before, { ...input, about: fitted.about })
     if (typeof outcome === 'string') return { deny: `todo: ${outcome}` }
     const after = outcome === before ? before : await commit($, () => outcome)
     if (input.action !== 'read') await ensurePane($)
-    return { result: render(after) }
+    return { result: fitted.note ? `${render(after)}\n(${fitted.note})` : render(after) }
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
@@ -526,9 +534,11 @@ export const register: Register = (on, options) => {
     if (verb === 'about') {
       const [list, ...words] = rest
       if (!list) return { text: 'Usage: /todo about <list> [text]  (no text clears it)' }
-      const outcome = applyTool(todo, { action: 'describe', list, about: words.join(' ') })
+      const fitted = fitAbout(words.join(' '))
+      const outcome = applyTool(todo, { action: 'describe', list, about: fitted.about })
       if (typeof outcome === 'string') return { text: outcome }
-      return { text: render(await commit($, () => outcome)) }
+      const text = render(await commit($, () => outcome))
+      return { text: fitted.note ? `${text}\n(${fitted.note})` : text }
     }
     if (verb === 'start' || verb === 'done' || verb === 'remove') {
       const arg = rest.join(' ')

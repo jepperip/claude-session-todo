@@ -4,7 +4,7 @@ A Claude Code mod that puts the session's todo list in a side pane. The agent ke
 
 ## What you get
 
-- **A "Todo" pane** beside the transcript, opened at session start. Lists are stacked sections, the active one first with a bold title, each with an optional one-line `about` under the title saying what the list is for (capped at 80 characters, so it stays a line). Each row shows a status glyph, the item text and an optional note; items are numbered straight through the pane. Click the glyph to cycle an item pending → in progress → done. Every in-progress item is repeated in a `now:` block, and a legend closes the pane.
+- **A "Todo" pane** beside the transcript, opened at session start. Lists are stacked sections, the active one first with a bold title, each with an optional one-line `about` under the title saying what the list is for (cut to 80 characters with an ellipsis, so it stays a line). Each row shows a status glyph, the item text and an optional note; items are numbered straight through the pane. Click the glyph to cycle an item pending → in progress → done. Every in-progress item is repeated in a `now:` block, and a legend closes the pane.
 - **A status line** under the prompt: `Todo 2/5 · now: <current item> (+1)`.
 - **A progress bar** under each list title: done, in progress and blocked take their share in colour, the rest is dim, with the percentage done at the end.
 - **A `/todo` command** for your own edits: `/todo` (show), `/todo add [@list] <text>`, `/todo start <n>`, `/todo done <n>`, `/todo remove <n>`, `/todo about <list> [text]`, `/todo clear [list]`, `/todo drop <list>`, `/todo focus <list>`, `/todo theme <name>`.

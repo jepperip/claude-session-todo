@@ -67,17 +67,28 @@ test('a second list keeps ids unique across lists and does not steal focus', asy
   expect(await shown($)).toContain('[followup] (active)')
 })
 
-test('about is kept to one short line: set on write, changed by describe, refused past the cap', async ($, on) => {
+test('about is kept to one short line: set on write, kept across writes, changed by describe', async ($, on) => {
   engine(on)
   await $.tool.call({ tool: TOOL, action: 'write', list: 'a', about: '  Why this   list exists ', items: [{ text: 'One' }] })
   expect(await shown($)).toContain('\n  Why this list exists\n')
   await $.tool.call({ tool: TOOL, action: 'write', list: 'a', items: [{ text: 'Two' }] })
   expect(await shown($)).toContain('\n  Why this list exists\n')
-  const tooLong = await $.tool.call({ tool: TOOL, action: 'describe', list: 'a', about: 'x'.repeat(81) })
-  expect(tooLong.deny).toContain('81 characters')
-  expect(await shown($)).toContain('\n  Why this list exists\n')
   await $.tool.call({ tool: TOOL, action: 'describe', list: 'a', about: '' })
   expect(await shown($)).not.toContain('Why this list exists')
+})
+
+test('a long about never fails the call: it is cut at a word with an ellipsis and the result says so', async ($, on) => {
+  engine(on)
+  const long = 'Done when the gateway, the resource group and the storage vnet are all gone from the subscription'
+  const answer = await $.tool.call({ tool: TOOL, action: 'write', list: 'a', about: long, items: [{ text: 'One' }] })
+  expect(answer.deny).toBeUndefined()
+  expect(answer.result).toContain(`about was ${long.length} characters and is cut to 80`)
+  const text = await shown($)
+  const line = text.split('\n').find(one => one.startsWith('  Done when'))
+  expect(line).toBeDefined()
+  expect(line?.trim().length).toBeLessThanOrEqual(80)
+  expect(line?.endsWith('…')).toBe(true)
+  expect(line).not.toContain('subscri')
 })
 
 test('update finds an item in any list by id and leaves the rest', async ($, on) => {
