@@ -15,8 +15,10 @@ const THEME_FIELD = 'theme'
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'done', 'blocked']
 
+// The empty box holds a figure space (U+2007), as wide as a digit, so it lines up with [x] where a
+// proportional font would draw a plain space narrower.
 const GLYPH: Record<TodoStatus, string> = {
-  pending: '[ ]',
+  pending: '[ ]',
   in_progress: '[>]',
   done: '[x]',
   blocked: '[!]',
@@ -272,7 +274,8 @@ function render(todo: TodoBoard): string {
     if (list.items.length === 0) lines.push('  (empty)')
     for (const item of list.items) {
       n++
-      lines.push(`  ${GLYPH[item.status]} ${n}. ${item.text} (${item.id})${item.note ? ` — ${item.note}` : ''}`)
+      const glyph = GLYPH[item.status].replace(' ', ' ')
+      lines.push(`  ${glyph} ${n}. ${item.text} (${item.id})${item.note ? ` — ${item.note}` : ''}`)
     }
   }
   return lines.join('\n')
@@ -311,21 +314,25 @@ async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard
 }
 
 /**
- * Writes the theme through the plugin's own /config row. The row's key carries the plugin's
- * loaded name, which differs by how it was loaded (`session-todo`, `session-todo@inline`,
+ * Writes one of the plugin's options through its own /config row. The row's key carries the
+ * plugin's loaded name, which differs by how it was loaded (`session-todo`, `session-todo@inline`,
  * `session-todo@<marketplace>`), so the row is found by its field rather than spelled out.
  * Resolves to the reason when the write did not happen.
  */
-async function setTheme($: EngineInterface, name: string): Promise<string | undefined> {
+async function setOption($: EngineInterface, field: string, value: string | boolean): Promise<string | undefined> {
   const rows = await $.config.list()
-  const row = rows.find(one => /^session-todo(@[^.]+)?\.theme$/.test(one.key))
-  if (!row) return `no "${THEME_FIELD}" row in /config for this plugin (rows: ${rows.length})`
+  const row = rows.find(one => one.key === `session-todo.${field}` || /^session-todo@[^.]+\.(.+)$/.exec(one.key)?.[1] === field)
+  if (!row) return `no "${field}" row in /config for this plugin (rows: ${rows.length})`
   try {
-    const set = await $.config.set({ key: row.key, value: name })
+    const set = await $.config.set({ key: row.key, value })
     return set.deny
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
+}
+
+function setTheme($: EngineInterface, name: string): Promise<string | undefined> {
+  return setOption($, THEME_FIELD, name)
 }
 
 async function ensurePane($: EngineInterface): Promise<void> {
@@ -471,10 +478,11 @@ function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
   return items.find(item => item.id === arg)
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}>]`
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}> | compact [on|off]]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
+  const isCompact = options.compact === true
   const theme = THEMES[themeKey] as Theme
 
   on('session.start', async ($, e, next) => {
@@ -486,8 +494,8 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name>]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>, compact [on|off]',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name> | compact [on|off]]',
     })
 
     const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
@@ -572,6 +580,11 @@ export const register: Register = (on, options) => {
       if (typeof outcome === 'string') return { text: outcome }
       return { text: render(await commit($, () => outcome)) }
     }
+    if (verb === 'compact') {
+      const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !isCompact
+      const failed = await setOption($, 'compact', wanted)
+      return { text: failed ? `Could not set compact: ${failed}` : `Compact rows ${wanted ? 'on' : 'off'}.` }
+    }
     if (verb === 'theme') {
       const name = rest[0]
       if (!name || !THEMES[name]) return { text: `Themes: ${THEME_NAMES.join(', ')}` }
@@ -612,6 +625,17 @@ export const register: Register = (on, options) => {
               />
             )
           })()}
+          <Button
+            plain
+            key="compact"
+            label={`${isCompact ? GLYPH.done : GLYPH.pending} compact`}
+            dimColor={!isCompact}
+            onPress={() =>
+              void setOption($, 'compact', !isCompact).then(failed => {
+                if (failed) $.ui.toast(`Could not set compact: ${failed}`)
+              })
+            }
+          />
         </Box>
       )
 
@@ -671,10 +695,10 @@ export const register: Register = (on, options) => {
                   {`${percentDone(list.items)}%`}
                 </Text>
               </Box>
-              {list.items.map(item => {
+              {list.items.map((item, index) => {
                 n++
                 return (
-                  <Box key={`row:${item.id}`} flexDirection="column">
+                  <Box key={`row:${item.id}`} flexDirection="column" marginTop={index === 0 || isCompact ? 0 : 1}>
                     <Box flexDirection="row" gap={1}>
                       <Button
                         plain
