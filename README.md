@@ -4,12 +4,12 @@ A Claude Code mod that puts the session's todo list in a side pane. The agent ke
 
 ## What you get
 
-- **A "Todo" pane** beside the transcript, opened at session start. Each row shows a status glyph, the item text and an optional note. Click the glyph to cycle an item pending → in progress → done.
-- **A status line** under the prompt: `Todo 2/5 · now: <current item>`.
-- **A `/todo` command** for your own edits: `/todo` (show), `/todo add <text>`, `/todo start <n>`, `/todo done <n>`, `/todo remove <n>`, `/todo clear`.
-- **A `todo` tool** the agent calls (`mcp__session-todo__todo`): `write` the whole list, `add`, `update`, `remove`, `read`, `clear`. A system-prompt section tells the agent to write the plan before multi-step work, keep exactly one item in progress, and mark items done as it goes.
+- **A "Todo" pane** beside the transcript, opened at session start. Lists are stacked sections, the active one first with a bold title. Each row shows a status glyph, the item text and an optional note; items are numbered straight through the pane. Click the glyph to cycle an item pending → in progress → done. Every in-progress item is repeated in a `now:` block, and a legend closes the pane.
+- **A status line** under the prompt: `Todo 2/5 · now: <current item> (+1)`.
+- **A `/todo` command** for your own edits: `/todo` (show), `/todo add [@list] <text>`, `/todo start <n>`, `/todo done <n>`, `/todo remove <n>`, `/todo clear [list]`, `/todo drop <list>`, `/todo focus <list>`.
+- **A `todo` tool** the agent calls (`mcp__session-todo__todo`): `write` a named list, `add`, `update`, `remove`, `read` (every list), `clear`, `drop`, `focus`. A system-prompt section tells the agent to write the plan before multi-step work, keep the step it works on in progress (one at a time preferred, several allowed), mark items done as it goes, and keep follow-ups such as "open the PR" or "report to Jira" in a second list so the main plan stays focused.
 
-The list lives in the session's plugin state (survives hot reloads and context compaction) and is mirrored to the plugin store under the session id, so `claude --resume` brings it back. `/clear` empties it.
+Several lists, two flat levels (list, item), item ids unique across lists. The board lives in the session's plugin state (survives hot reloads and context compaction) and is mirrored to the plugin store under the session id, so `claude --resume` brings it back. `/clear` empties it.
 
 ## Install
 
