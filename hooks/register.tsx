@@ -534,7 +534,7 @@ export const register: Register = (on, options) => {
         </Text>
         <Box flexDirection="row" gap={1} flexShrink={0}>
           <Text color={theme.accent} dimColor={!theme.accent}>{`${done}/${items.length}`}</Text>
-          <Button key="open-pane" label="Todo" onPress={() => void ensurePane($)} />
+          <Button key="open-pane" label="All items" onPress={() => void ensurePane($)} />
         </Box>
       </Box>
     )
