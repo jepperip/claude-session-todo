@@ -585,7 +585,7 @@ export const register: Register = (on, options) => {
 
     let n = 0
     return (
-      <Box flexDirection="column" paddingX={1}>
+      <Box flexDirection="column" paddingX={1} minHeight={e.props.scroll.bodyRows}>
         <Box flexDirection="row" justifyContent="flex-end">
           <Button
             plain
@@ -683,6 +683,7 @@ export const register: Register = (on, options) => {
             ))}
           </Box>
         )}
+        <Box flexGrow={1} />
         <Box marginTop={1}>
           <Text dimColor wrap="wrap">
             {LEGEND}
