@@ -26,7 +26,10 @@ const GLYPH: Record<TodoStatus, string> = {
   blocked: '[!]',
 }
 
-const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  · click a glyph to cycle`
+/** Drawn dim at the end of a row the agent does itself, so the person's own steps stand out by its absence. */
+const AGENT_MARK = '✱'
+
+const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  ${AGENT_MARK} Claude's  · click a glyph to cycle`
 
 /** What a theme paints: the colour of each status, the accents, and the bar's two glyphs. */
 type Theme = {
@@ -165,12 +168,15 @@ type TodoToolInput = {
   list?: string
   title?: string
   about?: string
-  items?: Array<{ id?: string; text: string; status?: TodoStatus; note?: string }>
+  items?: Array<{ id?: string; text: string; status?: TodoStatus; note?: string; owner?: TodoOwner }>
   id?: string
   text?: string
   status?: TodoStatus
   note?: string
+  owner?: TodoOwner
 }
+
+type TodoOwner = NonNullable<TodoItem['owner']>
 
 const TOOL_DESCRIPTION = [
   'The todo lists the user watches in the Todo side pane. They are their view of the plan, so keep them current without being asked.',
@@ -178,6 +184,7 @@ const TOOL_DESCRIPTION = [
   '- write: replace one list with its steps (list, title, items, optional about). Do this before work with three or more steps, or that spans more than one turn, starts. The first list written becomes the active one, drawn first; focus switches it.',
   `- about (optional, one line of at most ${ABOUT_MAX} characters; a longer one is cut with an ellipsis): one short sentence under the title saying what the list is for or what done looks like, so the user still knows a day later. Not a summary of the items. Set it with write and leave it; describe changes it later.`,
   '- add / update / remove: one item. Mark the step you begin in_progress (prefer one at a time, several when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the user.',
+  '- owner: who does the item, "agent" (you; the default) or "user". Mark a step "user" when only the person can take it: approve, decide, click, run something you may not. The pane marks your own items so theirs stand out.',
   '- read: every list as the pane shows it, with ids. Call it after a context compaction.',
   '- clear: empty one list (list) or all. drop: remove a list. focus: make a list the active one. describe: set or clear a list\'s about (list, about).',
   'Use a second list, e.g. "followup", for things to do after the main work (open the PR, report a finding to Jira), so the main list stays focused.',
@@ -207,6 +214,7 @@ const TOOL_SCHEMA = {
           text: { type: 'string' },
           status: { type: 'string', enum: STATUSES },
           note: { type: 'string' },
+          owner: { type: 'string', enum: ['agent', 'user'] },
         },
         required: ['text'],
       },
@@ -215,6 +223,7 @@ const TOOL_SCHEMA = {
     text: { type: 'string', description: 'The item text (add, update).' },
     status: { type: 'string', enum: STATUSES, description: 'The new status (add, update).' },
     note: { type: 'string', description: 'A short note on the item, e.g. why it is blocked (add, update). Empty removes it.' },
+    owner: { type: 'string', enum: ['agent', 'user'], description: 'Who does the item (add, update): agent (default) or user.' },
   },
   required: ['action'],
 }
@@ -286,7 +295,8 @@ function render(todo: TodoBoard): string {
     for (const item of list.items) {
       n++
       const glyph = GLYPH[item.status].replace(' ', ' ')
-      lines.push(`  ${glyph} ${n}. ${item.text} (${item.id})${item.note ? ` — ${item.note}` : ''}`)
+      const owner = item.owner === 'user' ? ' [user]' : ''
+      lines.push(`  ${glyph} ${n}. ${item.text} (${item.id})${owner}${item.note ? ` — ${item.note}` : ''}`)
     }
   }
   return lines.join('\n')
@@ -383,7 +393,7 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
           while (taken.has(id))
         }
         taken.add(id)
-        const item: TodoItem = { id, text: given.text, status: given.status ?? 'pending' }
+        const item: TodoItem = { id, text: given.text, status: given.status ?? 'pending', owner: given.owner ?? 'agent' }
         if (given.note) item.note = given.note
         items.push(item)
       }
@@ -403,7 +413,7 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
         target = { name, title: name, items: [] }
         lists = [...lists, target]
       }
-      const item: TodoItem = { id: `t${todo.nextId}`, text: input.text, status: input.status ?? 'pending' }
+      const item: TodoItem = { id: `t${todo.nextId}`, text: input.text, status: input.status ?? 'pending', owner: input.owner ?? 'agent' }
       if (input.note) item.note = input.note
       const added = target
       return {
@@ -420,6 +430,7 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
         const changed: TodoItem = { ...item }
         if (input.text) changed.text = input.text
         if (input.status) changed.status = input.status
+        if (input.owner) changed.owner = input.owner
         if (input.note !== undefined) {
           if (input.note) changed.note = input.note
           else delete changed.note
@@ -612,7 +623,7 @@ export const register: Register = (on, options) => {
       const list = rest[0]?.startsWith('@') ? rest.shift()?.slice(1) : undefined
       const text = rest.join(' ')
       if (!text) return { text: 'Usage: /todo add [@list] <text>' }
-      const outcome = applyTool(todo, { action: 'add', list, text })
+      const outcome = applyTool(todo, { action: 'add', list, text, owner: 'user' })
       if (typeof outcome === 'string') return { text: outcome }
       const after = await commit($, () => outcome)
       await openPane($)
@@ -786,15 +797,20 @@ export const register: Register = (on, options) => {
                         dimColor={item.status === 'done'}
                         onPress={toggle(item)}
                       />
-                      <Text
-                        wrap="wrap"
-                        bold={item.status === 'in_progress'}
-                        dimColor={item.status === 'done'}
-                        strikethrough={item.status === 'done'}
-                        color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
-                      >
-                        {`${n}. ${item.text}`}
-                      </Text>
+                      <Box flexDirection="row" justifyContent="space-between" gap={1} flexGrow={1} minWidth={0}>
+                        <Text
+                          wrap="wrap"
+                          bold={item.status === 'in_progress'}
+                          dimColor={item.status === 'done'}
+                          strikethrough={item.status === 'done'}
+                          color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
+                        >
+                          {`${n}. ${item.text}`}
+                        </Text>
+                        {item.owner !== 'user' && (
+                          <Text dimColor>{AGENT_MARK}</Text>
+                        )}
+                      </Box>
                     </Box>
                     {item.note && (
                       <Box paddingLeft={4}>

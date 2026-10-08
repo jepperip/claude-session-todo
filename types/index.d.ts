@@ -7,6 +7,8 @@ export type TodoItem = {
   status: TodoStatus
   /** A short note on why it is blocked, or what was decided. */
   note?: string
+  /** Who does it: the agent (the default for items it writes) or the person (items they add, or steps only they can take). */
+  owner?: 'agent' | 'user'
 }
 
 export type TodoList = {
