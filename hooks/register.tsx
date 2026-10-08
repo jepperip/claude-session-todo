@@ -538,9 +538,13 @@ export const register: Register = (on, options) => {
           <Text bold color={isIdle ? undefined : theme.status.in_progress} dimColor={isIdle}>
             {isIdle ? GLYPH.pending : GLYPH.in_progress}
           </Text>
-          <Text wrap="truncate-end" color={isIdle ? undefined : theme.status.in_progress} dimColor={isIdle}>
-            {now}
-          </Text>
+          {isIdle ? (
+            <Text wrap="truncate-end" dimColor>
+              {now}
+            </Text>
+          ) : (
+            <Button plain key="open-current" label={now} onPress={() => void ensurePane($)} />
+          )}
         </Box>
         <Box flexDirection="row" gap={1} flexShrink={0}>
           <Text color={theme.accent} dimColor={!theme.accent}>{`${done}/${items.length}`}</Text>
