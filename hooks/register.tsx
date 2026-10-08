@@ -26,7 +26,7 @@ const GLYPH: Record<TodoStatus, string> = {
   blocked: '[!]',
 }
 
-/** Drawn dim at the end of a row the agent does itself, so the person's own steps stand out by its absence. */
+/** Follows the text of an item the agent does itself, so the person's own steps stand out by its absence. */
 const AGENT_MARK = '✱'
 
 const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  ${AGENT_MARK} Claude's  · click a glyph to cycle`
@@ -797,20 +797,15 @@ export const register: Register = (on, options) => {
                         dimColor={item.status === 'done'}
                         onPress={toggle(item)}
                       />
-                      <Box flexDirection="row" justifyContent="space-between" gap={1} flexGrow={1} minWidth={0}>
-                        <Text
-                          wrap="wrap"
-                          bold={item.status === 'in_progress'}
-                          dimColor={item.status === 'done'}
-                          strikethrough={item.status === 'done'}
-                          color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
-                        >
-                          {`${n}. ${item.text}`}
-                        </Text>
-                        {item.owner !== 'user' && (
-                          <Text dimColor>{AGENT_MARK}</Text>
-                        )}
-                      </Box>
+                      <Text
+                        wrap="wrap"
+                        bold={item.status === 'in_progress'}
+                        dimColor={item.status === 'done'}
+                        strikethrough={item.status === 'done'}
+                        color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
+                      >
+                        {`${n}. ${item.text}${item.owner === 'user' ? '' : ` ${AGENT_MARK}`}`}
+                      </Text>
                     </Box>
                     {item.note && (
                       <Box paddingLeft={4}>
