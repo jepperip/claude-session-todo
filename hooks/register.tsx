@@ -157,12 +157,12 @@ type TodoToolInput = {
 const TOOL_DESCRIPTION = [
   'The todo lists the user watches in the Todo side pane. They are their view of the plan, so keep them current without being asked.',
   'Lists are named (default "main"); items are addressed by id, unique across lists.',
-  '- write: replace one list with its steps (list, title, items). Do this before multi-step work starts. The first list written becomes the active one, drawn first; focus switches it.',
+  '- write: replace one list with its steps (list, title, items). Do this before work with three or more steps, or that spans more than one turn, starts. The first list written becomes the active one, drawn first; focus switches it.',
   '- add / update / remove: one item. Mark the step you begin in_progress (prefer one at a time, several when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the user.',
   '- read: every list as the pane shows it, with ids. Call it after a context compaction.',
   '- clear: empty one list (list) or all. drop: remove a list. focus: make a list the active one.',
   'Use a second list, e.g. "followup", for things to do after the main work (open the PR, report a finding to Jira), so the main list stays focused.',
-  'Keep item text short and imperative, one line each.',
+  'Keep item text short and imperative, one line each. Before reporting a task finished, leave its list true: every item done, items that fell away removed.',
 ].join('\n')
 
 const TOOL_SCHEMA = {
@@ -201,7 +201,7 @@ const PROMPT_SECTION = {
   scope: 'session',
   text: [
     '# Session todo pane',
-    `The user sees live todo lists driven by the \`${TOOL}\` tool. Use it instead of narrating the plan: write the steps before multi-step work, mark the step you work on in_progress (prefer one at a time), mark it done the moment it finishes, and add or remove items as the work changes. Keep follow-ups (open the PR, report to Jira, update docs) in a separate list so the main plan stays focused. The pane is the user's way of seeing what is left without asking, so a stale list is worse than none. After a context compaction, call read to recover the lists.`,
+    `The user sees live todo lists driven by the \`${TOOL}\` tool. Use it instead of narrating the plan: write the steps before any work with three or more steps or that will span more than one turn (a single edit needs no list), mark the step you work on in_progress (prefer one at a time), mark it done the moment it finishes, and add or remove items as the work changes. Keep follow-ups (open the PR, report to Jira, update docs) in a separate list so the main plan stays focused. Before reporting a task finished, leave its list true: every item done, and items that fell away removed. The pane is the user's way of seeing what is left without asking, so a stale list is worse than none. After a context compaction, call read to recover the lists.`,
   ].join('\n'),
 } as const
 
