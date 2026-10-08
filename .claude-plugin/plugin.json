@@ -1,6 +1,6 @@
 {
   "name": "session-todo",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "A live todo pane for the session: the agent keeps it current through a tool, you read and tick it without asking.",
   "author": { "name": "Jesper Sahlin", "url": "https://github.com/jepperip" },
   "types": "./types/index.d.ts",
