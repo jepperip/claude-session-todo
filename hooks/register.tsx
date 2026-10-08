@@ -129,16 +129,25 @@ type BarSegment = { status: TodoStatus; cells: number }
 function barSegments(items: readonly TodoItem[], width: number): BarSegment[] {
   const total = items.length
   if (total === 0) return [{ status: 'pending', cells: width }]
-  const segments: BarSegment[] = []
-  let counted = 0
-  let drawn = 0
-  for (const status of BAR_ORDER) {
-    counted += items.filter(item => item.status === status).length
-    const edge = Math.round((counted / total) * width)
-    segments.push({ status, cells: edge - drawn })
-    drawn = edge
+  const counts = BAR_ORDER.map(status => ({ status, count: items.filter(item => item.status === status).length }))
+  const present = counts.filter(one => one.count > 0)
+  // Every status that has an item gets at least one cell, so a lone blocked item still shows on a
+  // short bar; the rest of the width is shared in proportion, the largest remainders rounding up.
+  // With more statuses than cells (a bar under four cells) the floor cannot hold and the shares
+  // fall back to plain proportion.
+  const floor = present.length <= width ? 1 : 0
+  const spare = width - floor * present.length
+  const shares = present.map(one => {
+    const exact = (one.count / total) * spare
+    return { status: one.status, cells: floor + Math.floor(exact), remainder: exact - Math.floor(exact) }
+  })
+  let left = width - shares.reduce((sum, one) => sum + one.cells, 0)
+  for (const share of [...shares].sort((a, b) => b.remainder - a.remainder)) {
+    if (left === 0) break
+    share.cells += 1
+    left -= 1
   }
-  return segments
+  return shares.map(({ status, cells }) => ({ status, cells }))
 }
 
 function percentDone(items: readonly TodoItem[]): number {
@@ -603,7 +612,8 @@ export const register: Register = (on, options) => {
     const toggle = (item: TodoItem) => () =>
       void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })))
 
-    const barWidth = Math.max(8, Math.round(Math.min(32, e.props.bodyColumns - 12) * (theme.barScale ?? 1)))
+    // The bar sits in the title row, so it stays short: a sixth of the pane, between 8 and 18 cells.
+    const barWidth = Math.max(4, Math.round(Math.min(18, Math.max(8, Math.round(e.props.bodyColumns / 6))) * (theme.barScale ?? 1)))
     const isSettingsOpen = await read($, settingsOpen)
 
     const settings =
@@ -662,38 +672,39 @@ export const register: Register = (on, options) => {
           const isActive = list.name === todo.active
           return (
             <Box key={`list:${list.name}`} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-              <Box flexDirection="row" justifyContent="space-between">
-                <Text bold={isActive} dimColor={!isActive} color={isActive ? theme.title : undefined}>
+              <Box flexDirection="row" justifyContent="space-between" gap={2}>
+                <Text bold={isActive} dimColor={!isActive} color={isActive ? theme.title : undefined} wrap="wrap">
                   {list.title}
                 </Text>
-                <Text dimColor>{list.items.length === 0 ? 'empty' : `${done}/${list.items.length} done`}</Text>
-              </Box>
-              {list.about && (
-                <Text dimColor italic wrap="wrap">
-                  {list.about}
-                </Text>
-              )}
-              <Box flexDirection="row" gap={1} marginBottom={list.items.length === 0 ? 0 : 1}>
-                <Box flexDirection="row">
-                  {barSegments(list.items, barWidth)
-                    .filter(segment => segment.cells > 0)
-                    .map(segment => (
-                      <Text
-                        key={`bar:${list.name}:${segment.status}`}
-                        color={theme.status[segment.status]}
-                        dimColor={segment.status === 'pending' && !theme.status.pending}
-                      >
-                        {(segment.status === 'pending' ? theme.barRest : theme.barFill).repeat(segment.cells)}
-                      </Text>
-                    ))}
+                <Box flexDirection="row" gap={1} flexShrink={0}>
+                  <Box flexDirection="row">
+                    {barSegments(list.items, barWidth)
+                      .filter(segment => segment.cells > 0)
+                      .map(segment => (
+                        <Text
+                          key={`bar:${list.name}:${segment.status}`}
+                          color={theme.status[segment.status]}
+                          dimColor={segment.status === 'pending' && !theme.status.pending}
+                        >
+                          {(segment.status === 'pending' ? theme.barRest : theme.barFill).repeat(segment.cells)}
+                        </Text>
+                      ))}
+                  </Box>
+                  <Text
+                    bold={done === list.items.length && done > 0}
+                    dimColor={done !== list.items.length && !theme.accent}
+                    color={theme.accent}
+                  >
+                    {list.items.length === 0 ? 'empty' : `${done}/${list.items.length}`}
+                  </Text>
                 </Box>
-                <Text
-                  bold={done === list.items.length && done > 0}
-                  dimColor={done !== list.items.length && !theme.accent}
-                  color={theme.accent}
-                >
-                  {`${percentDone(list.items)}%`}
-                </Text>
+              </Box>
+              <Box marginBottom={list.items.length === 0 ? 0 : 1}>
+                {list.about && (
+                  <Text dimColor italic wrap="wrap">
+                    {list.about}
+                  </Text>
+                )}
               </Box>
               {list.items.map((item, index) => {
                 n++
