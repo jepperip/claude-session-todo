@@ -11,7 +11,7 @@ const EMPTY: TodoBoard = { lists: [], nextId: 1 }
 
 const board = atom({ plugin: 'session-todo', key: 'board' } as const, EMPTY)
 const settingsOpen = atom({ plugin: 'session-todo', key: 'settingsOpen' } as const, false)
-const THEME_CONFIG_KEY = 'session-todo.theme'
+const THEME_FIELD = 'theme'
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'done', 'blocked']
 
@@ -309,6 +309,24 @@ async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard
   return todo
 }
 
+/**
+ * Writes the theme through the plugin's own /config row. The row's key carries the plugin's
+ * loaded name, which differs by how it was loaded (`session-todo`, `session-todo@inline`,
+ * `session-todo@<marketplace>`), so the row is found by its field rather than spelled out.
+ * Resolves to the reason when the write did not happen.
+ */
+async function setTheme($: EngineInterface, name: string): Promise<string | undefined> {
+  const rows = await $.config.list()
+  const row = rows.find(one => /^session-todo(@[^.]+)?\.theme$/.test(one.key))
+  if (!row) return `no "${THEME_FIELD}" row in /config for this plugin (rows: ${rows.length})`
+  try {
+    const set = await $.config.set({ key: row.key, value: name })
+    return set.deny
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
 async function ensurePane($: EngineInterface): Promise<void> {
   const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
   if (!isUp) await $.ui.open({ id: PANE, title: 'Todo' })
@@ -556,9 +574,8 @@ export const register: Register = (on, options) => {
     if (verb === 'theme') {
       const name = rest[0]
       if (!name || !THEMES[name]) return { text: `Themes: ${THEME_NAMES.join(', ')}` }
-      const set = await $.config.set({ key: THEME_CONFIG_KEY, value: name })
-      if (set.deny) return { text: `Could not set the theme: ${set.deny}` }
-      return { text: `Theme set to ${name}.` }
+      const failed = await setTheme($, name)
+      return { text: failed ? `Could not set the theme: ${failed}` : `Theme set to ${name}.` }
     }
     return { text: USAGE }
   })
@@ -586,7 +603,11 @@ export const register: Register = (on, options) => {
                 key="theme"
                 value={themeKey}
                 options={THEME_NAMES.map(name => ({ value: name, label: name }))}
-                onSelect={value => void $.config.set({ key: THEME_CONFIG_KEY, value })}
+                onSelect={value =>
+                  void setTheme($, value).then(failed => {
+                    if (failed) $.ui.toast(`Could not set the theme: ${failed}`)
+                  })
+                }
               />
             )
           })()}
