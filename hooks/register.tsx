@@ -498,7 +498,11 @@ export const register: Register = (on, options) => {
     const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
     if (saved && Array.isArray(saved.lists)) await update($, board, () => saved)
 
-    void $.ui.open({ id: PANE, title: 'Todo' }).then(() => redraw($))
+    // The pane opens on its own only when there is something to show: a restored board with
+    // items. Otherwise the first write (the agent's or /todo add) opens it.
+    if (saved && Array.isArray(saved.lists) && allItems(saved).length > 0) {
+      void $.ui.open({ id: PANE, title: 'Todo' }).then(() => redraw($))
+    }
     return next(e)
   })
 
