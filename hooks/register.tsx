@@ -143,10 +143,14 @@ function percentDone(items: readonly TodoItem[]): number {
   return Math.round((items.filter(item => item.status === 'done').length / items.length) * 100)
 }
 
+/** The longest `about` line a list may carry: one short sentence, never a paragraph. */
+const ABOUT_MAX = 80
+
 type TodoToolInput = {
-  action: 'write' | 'add' | 'update' | 'remove' | 'read' | 'clear' | 'drop' | 'focus'
+  action: 'write' | 'add' | 'update' | 'remove' | 'read' | 'clear' | 'drop' | 'focus' | 'describe'
   list?: string
   title?: string
+  about?: string
   items?: Array<{ id?: string; text: string; status?: TodoStatus; note?: string }>
   id?: string
   text?: string
@@ -157,10 +161,11 @@ type TodoToolInput = {
 const TOOL_DESCRIPTION = [
   'The todo lists the user watches in the Todo side pane. They are their view of the plan, so keep them current without being asked.',
   'Lists are named (default "main"); items are addressed by id, unique across lists.',
-  '- write: replace one list with its steps (list, title, items). Do this before work with three or more steps, or that spans more than one turn, starts. The first list written becomes the active one, drawn first; focus switches it.',
+  '- write: replace one list with its steps (list, title, items, optional about). Do this before work with three or more steps, or that spans more than one turn, starts. The first list written becomes the active one, drawn first; focus switches it.',
+  `- about (optional, at most ${ABOUT_MAX} characters): one short sentence under the title saying what the list is for or what done looks like, so the user still knows a day later. Not a summary of the items. Set it with write and leave it; describe changes it later.`,
   '- add / update / remove: one item. Mark the step you begin in_progress (prefer one at a time, several when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the user.',
   '- read: every list as the pane shows it, with ids. Call it after a context compaction.',
-  '- clear: empty one list (list) or all. drop: remove a list. focus: make a list the active one.',
+  '- clear: empty one list (list) or all. drop: remove a list. focus: make a list the active one. describe: set or clear a list\'s about (list, about).',
   'Use a second list, e.g. "followup", for things to do after the main work (open the PR, report a finding to Jira), so the main list stays focused.',
   'Keep item text short and imperative, one line each. Before reporting a task finished, leave its list true: every item done, items that fell away removed.',
 ].join('\n')
@@ -168,12 +173,16 @@ const TOOL_DESCRIPTION = [
 const TOOL_SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['write', 'add', 'update', 'remove', 'read', 'clear', 'drop', 'focus'] },
+    action: { type: 'string', enum: ['write', 'add', 'update', 'remove', 'read', 'clear', 'drop', 'focus', 'describe'] },
     list: {
       type: 'string',
-      description: 'The list name (write, add, clear, drop, focus). Defaults to the active list, or "main".',
+      description: 'The list name (write, add, clear, drop, focus, describe). Defaults to the active list, or "main".',
     },
     title: { type: 'string', description: 'A heading for the list (write only); defaults to the name.' },
+    about: {
+      type: 'string',
+      description: `One short line under the title saying what the list is for (write, describe). Optional; at most ${ABOUT_MAX} characters. Empty clears it.`,
+    },
     items: {
       type: 'array',
       description: 'The whole list (write only). Reuse an existing id to keep an item in place.',
@@ -201,7 +210,7 @@ const PROMPT_SECTION = {
   scope: 'session',
   text: [
     '# Session todo pane',
-    `The user sees live todo lists driven by the \`${TOOL}\` tool. Use it instead of narrating the plan: write the steps before any work with three or more steps or that will span more than one turn (a single edit needs no list), mark the step you work on in_progress (prefer one at a time), mark it done the moment it finishes, and add or remove items as the work changes. Keep follow-ups (open the PR, report to Jira, update docs) in a separate list so the main plan stays focused. Before reporting a task finished, leave its list true: every item done, and items that fell away removed. The pane is the user's way of seeing what is left without asking, so a stale list is worse than none. After a context compaction, call read to recover the lists.`,
+    `The user sees live todo lists driven by the \`${TOOL}\` tool. Use it instead of narrating the plan: write the steps before any work with three or more steps or that will span more than one turn (a single edit needs no list), mark the step you work on in_progress (prefer one at a time), mark it done the moment it finishes, and add or remove items as the work changes. Keep follow-ups (open the PR, report to Jira, update docs) in a separate list so the main plan stays focused. A list may carry an optional \`about\`: one short sentence on what it is for, set when the list is written and then left alone. Before reporting a task finished, leave its list true: every item done, and items that fell away removed. The pane is the user's way of seeing what is left without asking, so a stale list is worse than none. After a context compaction, call read to recover the lists.`,
   ].join('\n'),
 } as const
 
@@ -258,6 +267,7 @@ function render(todo: TodoBoard): string {
     const done = list.items.filter(item => item.status === 'done').length
     const marker = list.name === todo.active ? ' (active)' : ''
     lines.push(`${list.title} [${list.name}]${marker} ${done}/${list.items.length} done`)
+    if (list.about) lines.push(`  ${list.about}`)
     if (list.items.length === 0) lines.push('  (empty)')
     for (const item of list.items) {
       n++
@@ -319,7 +329,10 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
         if (given.note) item.note = given.note
         items.push(item)
       }
+      const about = aboutOf(input.about, existing?.about)
+      if (typeof about === 'object') return about.error
       const list: TodoList = { name: existing?.name ?? name, title: input.title ?? existing?.title ?? name, items }
+      if (about) list.about = about
       const lists = existing ? todo.lists.map(one => (one === existing ? list : one)) : [...todo.lists, list]
       return { lists, active: todo.active ?? list.name, nextId }
     }
@@ -382,9 +395,36 @@ function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
       if (!target) return `no list named ${input.list ?? '(none)'}`
       return { ...todo, active: target.name }
     }
+    case 'describe': {
+      const target = targetList(todo, input.list)
+      if (!target) return `no list named ${input.list ?? '(none)'}`
+      const about = aboutOf(input.about, undefined)
+      if (typeof about === 'object') return about.error
+      return {
+        ...todo,
+        lists: todo.lists.map(list => {
+          if (list !== target) return list
+          const changed: TodoList = { ...list }
+          if (about) changed.about = about
+          else delete changed.about
+          return changed
+        }),
+      }
+    }
     default:
       return `unknown action ${String((input as { action?: unknown }).action)}`
   }
+}
+
+/**
+ * The `about` a call leaves on a list: the given one trimmed, the current one when none is given,
+ * or an error when the given one runs past the cap.
+ */
+function aboutOf(given: string | undefined, current: string | undefined): string | undefined | { error: string } {
+  if (given === undefined) return current
+  const about = given.trim().replace(/\s+/g, ' ')
+  if (about.length > ABOUT_MAX) return { error: `about is ${about.length} characters; keep it to ${ABOUT_MAX} or fewer` }
+  return about || undefined
 }
 
 /** An item by its number in the pane (counted across lists in drawn order) or by id. */
@@ -395,7 +435,7 @@ function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
   return items.find(item => item.id === arg)
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}>]`
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}>]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
@@ -410,8 +450,8 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, clear [list], drop <list>, focus <list>, theme <name>',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | clear [list] | drop <list> | focus <list> | theme <name>]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name>]',
     })
 
     const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
@@ -467,6 +507,13 @@ export const register: Register = (on, options) => {
     }
     if (verb === 'clear' || verb === 'drop' || verb === 'focus') {
       const outcome = applyTool(todo, { action: verb, list: rest[0] })
+      if (typeof outcome === 'string') return { text: outcome }
+      return { text: render(await commit($, () => outcome)) }
+    }
+    if (verb === 'about') {
+      const [list, ...words] = rest
+      if (!list) return { text: 'Usage: /todo about <list> [text]  (no text clears it)' }
+      const outcome = applyTool(todo, { action: 'describe', list, about: words.join(' ') })
       if (typeof outcome === 'string') return { text: outcome }
       return { text: render(await commit($, () => outcome)) }
     }
@@ -552,6 +599,11 @@ export const register: Register = (on, options) => {
                 </Text>
                 <Text dimColor>{list.items.length === 0 ? 'empty' : `${done}/${list.items.length} done`}</Text>
               </Box>
+              {list.about && (
+                <Text dimColor italic wrap="wrap">
+                  {list.about}
+                </Text>
+              )}
               <Box flexDirection="row" gap={1} marginBottom={list.items.length === 0 ? 0 : 1}>
                 <Box flexDirection="row">
                   {barSegments(list.items, barWidth)

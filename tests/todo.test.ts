@@ -42,6 +42,18 @@ test('a second list keeps ids unique across lists and does not steal focus', asy
   expect(new Set(ids).size).toBe(ids.length)
 })
 
+test('about is kept to one short line: set on write, changed by describe, refused past the cap', async $ => {
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'a', about: '  Why this   list exists ', items: [{ text: 'One' }] })
+  expect((await board($)).lists[0]?.about).toBe('Why this list exists')
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'a', items: [{ text: 'Two' }] })
+  expect((await board($)).lists[0]?.about).toBe('Why this list exists')
+  const tooLong = await $.tool.call({ tool: TOOL, action: 'describe', list: 'a', about: 'x'.repeat(81) })
+  expect(tooLong.isError).toBe(true)
+  expect((await board($)).lists[0]?.about).toBe('Why this list exists')
+  await $.tool.call({ tool: TOOL, action: 'describe', list: 'a', about: '' })
+  expect((await board($)).lists[0]?.about).toBeUndefined()
+})
+
 test('update finds an item in any list by id and leaves the rest', async $ => {
   await $.tool.call({ tool: TOOL, action: 'write', list: 'a', items: [{ id: 'one', text: 'One' }] })
   await $.tool.call({ tool: TOOL, action: 'write', list: 'b', items: [{ id: 'two', text: 'Two' }] })

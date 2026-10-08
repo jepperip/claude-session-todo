@@ -13,6 +13,8 @@ export type TodoList = {
   /** What the tool and /todo address the list by. */
   name: string
   title: string
+  /** One short line under the title saying what the list is for; optional, at most ABOUT_MAX characters. */
+  about?: string
   items: TodoItem[]
 }
 
