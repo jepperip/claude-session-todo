@@ -10,6 +10,8 @@ const DEFAULT_LIST = 'main'
 const EMPTY: TodoBoard = { lists: [], nextId: 1 }
 
 const board = atom({ plugin: 'session-todo', key: 'board' } as const, EMPTY)
+const settingsOpen = atom({ plugin: 'session-todo', key: 'settingsOpen' } as const, false)
+const THEME_CONFIG_KEY = 'session-todo.theme'
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'done', 'blocked']
 
@@ -22,16 +24,101 @@ const GLYPH: Record<TodoStatus, string> = {
 
 const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  · click a glyph to cycle`
 
+/** What a theme paints: the colour of each status, the accents, and the bar's two glyphs. */
+type Theme = {
+  status: Record<TodoStatus, string | undefined>
+  /** The active list's title; undefined keeps the surface's text colour. */
+  title: string | undefined
+  /** The percentage and the `now:` lines. */
+  accent: string | undefined
+  barFill: string
+  barRest: string
+  /** How many glyphs fit where one plain cell would: under 1 for glyphs the desktop draws wider than a cell. */
+  barScale?: number
+}
+
+const THEMES: Record<string, Theme> = {
+  classic: {
+    status: { done: 'green', in_progress: 'yellow', blocked: 'red', pending: undefined },
+    title: undefined,
+    accent: undefined,
+    barFill: '█',
+    barRest: '░',
+  },
+  cyberpunk: {
+    status: { done: '#39ff14', in_progress: '#c77dff', blocked: '#ff2975', pending: '#5a3d7a' },
+    title: '#c77dff',
+    accent: '#39ff14',
+    barFill: '▰',
+    barRest: '▱',
+    barScale: 0.55,
+  },
+  dracula: {
+    status: { done: '#50fa7b', in_progress: '#f1fa8c', blocked: '#ff5555', pending: '#6272a4' },
+    title: '#bd93f9',
+    accent: '#ff79c6',
+    barFill: '█',
+    barRest: '░',
+  },
+  nord: {
+    status: { done: '#a3be8c', in_progress: '#ebcb8b', blocked: '#bf616a', pending: '#4c566a' },
+    title: '#88c0d0',
+    accent: '#81a1c1',
+    barFill: '█',
+    barRest: '░',
+  },
+  solarized: {
+    status: { done: '#859900', in_progress: '#b58900', blocked: '#dc322f', pending: '#586e75' },
+    title: '#268bd2',
+    accent: '#2aa198',
+    barFill: '█',
+    barRest: '░',
+  },
+  gruvbox: {
+    status: { done: '#b8bb26', in_progress: '#fabd2f', blocked: '#fb4934', pending: '#665c54' },
+    title: '#fe8019',
+    accent: '#83a598',
+    barFill: '█',
+    barRest: '░',
+  },
+  monokai: {
+    status: { done: '#a6e22e', in_progress: '#e6db74', blocked: '#f92672', pending: '#75715e' },
+    title: '#ae81ff',
+    accent: '#66d9ef',
+    barFill: '█',
+    barRest: '░',
+  },
+  catppuccin: {
+    status: { done: '#a6e3a1', in_progress: '#f9e2af', blocked: '#f38ba8', pending: '#585b70' },
+    title: '#cba6f7',
+    accent: '#89b4fa',
+    barFill: '█',
+    barRest: '░',
+  },
+  'tokyo-night': {
+    status: { done: '#9ece6a', in_progress: '#e0af68', blocked: '#f7768e', pending: '#565f89' },
+    title: '#bb9af7',
+    accent: '#7aa2f7',
+    barFill: '█',
+    barRest: '░',
+  },
+  'one-dark': {
+    status: { done: '#98c379', in_progress: '#e5c07b', blocked: '#e06c75', pending: '#5c6370' },
+    title: '#c678dd',
+    accent: '#61afef',
+    barFill: '█',
+    barRest: '░',
+  },
+}
+const DEFAULT_THEME = 'classic'
+const THEME_NAMES = Object.keys(THEMES)
+
+function themeName(name: unknown): string {
+  return typeof name === 'string' && THEMES[name] ? name : DEFAULT_THEME
+}
+
 /** The bar's segments left to right: what is finished, what is moving, what is stuck, what is left. */
 const BAR_ORDER: readonly TodoStatus[] = ['done', 'in_progress', 'blocked', 'pending']
-const BAR_COLOR: Record<TodoStatus, string | undefined> = {
-  done: 'green',
-  in_progress: 'yellow',
-  blocked: 'red',
-  pending: undefined,
-}
-const BAR_FILL = '█'
-const BAR_REST = '░'
 
 type BarSegment = { status: TodoStatus; cells: number }
 
@@ -308,13 +395,12 @@ function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
   return items.find(item => item.id === arg)
 }
 
-function usage(): { text: string } {
-  return {
-    text: 'Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | clear [list] | drop <list> | focus <list>]',
-  }
-}
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}>]`
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const themeKey = themeName(options.theme)
+  const theme = THEMES[themeKey] as Theme
+
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: 'todo',
@@ -324,8 +410,8 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, clear [list], drop <list>, focus <list>',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | clear [list] | drop <list> | focus <list>]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, clear [list], drop <list>, focus <list>, theme <name>',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | clear [list] | drop <list> | focus <list> | theme <name>]',
     })
 
     const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
@@ -397,7 +483,14 @@ export const register: Register = on => {
       if (typeof outcome === 'string') return { text: outcome }
       return { text: render(await commit($, () => outcome)) }
     }
-    return usage()
+    if (verb === 'theme') {
+      const name = rest[0]
+      if (!name || !THEMES[name]) return { text: `Themes: ${THEME_NAMES.join(', ')}` }
+      const set = await $.config.set({ key: THEME_CONFIG_KEY, value: name })
+      if (set.deny) return { text: `Could not set the theme: ${set.deny}` }
+      return { text: `Theme set to ${name}.` }
+    }
+    return { text: USAGE }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -409,11 +502,40 @@ export const register: Register = on => {
     const toggle = (item: TodoItem) => () =>
       void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })))
 
-    const barWidth = Math.max(12, Math.min(40, e.props.bodyColumns - 10))
+    const barWidth = Math.max(8, Math.round(Math.min(32, e.props.bodyColumns - 12) * (theme.barScale ?? 1)))
+    const isSettingsOpen = await read($, settingsOpen)
+
+    const settings =
+      !isSettingsOpen || e.surface === 'mobile' ? null : (
+        <Box flexDirection="row" gap={1} marginBottom={1}>
+          <Text dimColor>Theme</Text>
+          {(() => {
+            const { Select } = $.ui.resolve(e)
+            return (
+              <Select
+                key="theme"
+                value={themeKey}
+                options={THEME_NAMES.map(name => ({ value: name, label: name }))}
+                onSelect={value => void $.config.set({ key: THEME_CONFIG_KEY, value })}
+              />
+            )
+          })()}
+        </Box>
+      )
 
     let n = 0
     return (
       <Box flexDirection="column" paddingX={1}>
+        <Box flexDirection="row" justifyContent="flex-end">
+          <Button
+            plain
+            key="settings"
+            label="⚙"
+            dimColor={!isSettingsOpen}
+            onPress={() => void update($, settingsOpen, open => !open)}
+          />
+        </Box>
+        {settings}
         {lists.length === 0 && (
           <Text dimColor wrap="wrap">
             Nothing planned yet. The agent fills this in as work is planned; /todo add adds your own.
@@ -425,7 +547,7 @@ export const register: Register = on => {
           return (
             <Box key={`list:${list.name}`} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
               <Box flexDirection="row" justifyContent="space-between">
-                <Text bold={isActive} dimColor={!isActive}>
+                <Text bold={isActive} dimColor={!isActive} color={isActive ? theme.title : undefined}>
                   {list.title}
                 </Text>
                 <Text dimColor>{list.items.length === 0 ? 'empty' : `${done}/${list.items.length} done`}</Text>
@@ -437,14 +559,18 @@ export const register: Register = on => {
                     .map(segment => (
                       <Text
                         key={`bar:${list.name}:${segment.status}`}
-                        color={BAR_COLOR[segment.status]}
-                        dimColor={segment.status === 'pending'}
+                        color={theme.status[segment.status]}
+                        dimColor={segment.status === 'pending' && !theme.status.pending}
                       >
-                        {(segment.status === 'pending' ? BAR_REST : BAR_FILL).repeat(segment.cells)}
+                        {(segment.status === 'pending' ? theme.barRest : theme.barFill).repeat(segment.cells)}
                       </Text>
                     ))}
                 </Box>
-                <Text bold={done === list.items.length && done > 0} dimColor={done !== list.items.length}>
+                <Text
+                  bold={done === list.items.length && done > 0}
+                  dimColor={done !== list.items.length && !theme.accent}
+                  color={theme.accent}
+                >
                   {`${percentDone(list.items)}%`}
                 </Text>
               </Box>
@@ -465,7 +591,7 @@ export const register: Register = on => {
                         bold={item.status === 'in_progress'}
                         dimColor={item.status === 'done'}
                         strikethrough={item.status === 'done'}
-                        color={item.status === 'blocked' ? 'red' : item.status === 'in_progress' ? 'yellow' : undefined}
+                        color={item.status === 'done' ? undefined : theme.status[item.status]}
                       >
                         {`${n}. ${item.text}`}
                       </Text>
@@ -486,7 +612,7 @@ export const register: Register = on => {
         {current.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             {current.map(item => (
-              <Text key={`now:${item.id}`} dimColor wrap="wrap">
+              <Text key={`now:${item.id}`} dimColor={!theme.accent} color={theme.accent} wrap="wrap">
                 {`now: ${item.text}`}
               </Text>
             ))}

@@ -3,5 +3,14 @@
   "version": "0.1.0",
   "description": "A live todo pane for the session: the agent keeps it current through a tool, you read and tick it without asking.",
   "author": { "name": "Jesper Sahlin", "url": "https://github.com/jepperip" },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "theme": {
+      "type": "string",
+      "title": "Theme",
+      "description": "How the Todo pane is coloured: classic (the terminal's green, yellow, red), cyberpunk (neon green and purple), or a standard palette.",
+      "default": "classic",
+      "options": ["classic", "cyberpunk", "dracula", "nord", "solarized", "gruvbox", "monokai", "catppuccin", "tokyo-night", "one-dark"]
+    }
+  }
 }

@@ -27,6 +27,10 @@ export type TodoBoard = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'session-todo': { board: TodoBoard }
+    'session-todo': {
+      board: TodoBoard
+      /** Whether the pane's settings row (the theme selector) is unfolded. */
+      settingsOpen: boolean
+    }
   }
 }
