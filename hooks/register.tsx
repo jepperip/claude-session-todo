@@ -26,6 +26,7 @@ const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GL
 
 /** What a theme paints: the colour of each status, the accents, and the bar's two glyphs. */
 type Theme = {
+  /** Per status: the bar segment and, for in progress and blocked, the item text. Pending and done text keep the surface's colours. */
   status: Record<TodoStatus, string | undefined>
   /** The active list's title; undefined keeps the surface's text colour. */
   title: string | undefined
@@ -687,7 +688,7 @@ export const register: Register = (on, options) => {
                         bold={item.status === 'in_progress'}
                         dimColor={item.status === 'done'}
                         strikethrough={item.status === 'done'}
-                        color={item.status === 'done' ? undefined : theme.status[item.status]}
+                        color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
                       >
                         {`${n}. ${item.text}`}
                       </Text>
