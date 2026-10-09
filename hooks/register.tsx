@@ -36,6 +36,17 @@ const USER_MARK_COLOR = '#d4b24c'
 
 const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  ${AGENT_MARK} Claude's  ${USER_MARK} yours  · click a glyph to cycle`
 
+/** The speech bubble and the figure under it, drawn at the bottom of the pane on Fridays. */
+const FRIDAY_BUBBLE = ['╭──────────────────────╮', '│ have a nice weekend! │', '╰─┬────────────────────╯']
+const FRIDAY_GUY = ['  ╯', ' \\o/🍺', '  |', ' / \\']
+
+const FRIDAY = 5
+
+/** Whether the given moment falls on a Friday where this module runs. */
+function isFriday(epochMs: number): boolean {
+  return new Date(epochMs).getDay() === FRIDAY
+}
+
 /** What a theme paints: the colour of each status, the accents, and the bar's two glyphs. */
 type Theme = {
   /** Per status: the bar segment and, for in progress and blocked, the item text. Pending and done text keep the surface's colours. */
@@ -712,6 +723,7 @@ export const register: Register = (on, options) => {
     // The bar sits in the title row, so it stays short: a sixth of the pane, between 8 and 18 cells.
     const barWidth = Math.max(4, Math.round(Math.min(18, Math.max(8, Math.round(e.props.bodyColumns / 6))) * (theme.barScale ?? 1)))
     const isSettingsOpen = await read($, settingsOpen)
+    const friday = isFriday(await $.clock.now())
 
     const settings =
       !isSettingsOpen || e.surface === 'mobile' ? null : (
@@ -866,6 +878,20 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         <Box flexGrow={1} />
+        {friday && (
+          <Box flexDirection="column" marginTop={1}>
+            {FRIDAY_BUBBLE.map((line, i) => (
+              <Text key={`bubble:${i}`} wrap="truncate-end">
+                {line}
+              </Text>
+            ))}
+            {FRIDAY_GUY.map((line, i) => (
+              <Text key={`guy:${i}`} color={theme.accent} wrap="truncate-end">
+                {line}
+              </Text>
+            ))}
+          </Box>
+        )}
         <Box marginTop={1}>
           <Text dimColor wrap="wrap">
             {LEGEND}
