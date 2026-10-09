@@ -516,12 +516,24 @@ function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
   return items.find(item => item.id === arg)
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [on|off]]`
+/** When the band above the prompt shows: never, only while the pane is closed, or always. */
+type BandMode = 'off' | 'closed' | 'always'
+const BAND_MODES: readonly BandMode[] = ['off', 'closed', 'always']
+const BAND_LABELS: Record<BandMode, string> = { off: 'off', closed: 'when the pane is closed', always: 'always' }
+
+/** Reads the band option; a boolean left over from when it was an on/off switch maps onto the modes. */
+function bandMode(value: unknown): BandMode {
+  if (value === false) return 'off'
+  if (typeof value === 'string' && (BAND_MODES as readonly string[]).includes(value)) return value as BandMode
+  return 'closed'
+}
+
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}]]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
   const isCompact = options.compact === true
-  const hasBand = options.band !== false
+  const band = bandMode(options.band)
   const theme = THEMES[themeKey] as Theme
 
   on('session.start', async ($, e, next) => {
@@ -533,8 +545,8 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>, compact [on|off], band [on|off]',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name> | compact [on|off] | band [on|off]]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>, compact [on|off], band [off|closed|always]',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name> | compact [on|off] | band [off|closed|always]]',
     })
 
     const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
@@ -558,10 +570,10 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!hasBand || e.props.hasSurvey) return next(e)
+    if (band === 'off' || e.props.hasSurvey) return next(e)
     const todo = await read($, board)
     const items = allItems(todo)
-    if (items.length === 0 || (await isPaneShown($))) return next(e)
+    if (items.length === 0 || (band === 'closed' && (await isPaneShown($)))) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
     const done = items.filter(item => item.status === 'done').length
@@ -666,12 +678,18 @@ export const register: Register = (on, options) => {
       if (typeof outcome === 'string') return { text: outcome }
       return { text: render(await commit($, () => outcome)) }
     }
-    if (verb === 'compact' || verb === 'band') {
-      const current = verb === 'compact' ? isCompact : hasBand
-      const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !current
-      const failed = await setOption($, verb, wanted)
-      const label = verb === 'compact' ? 'Compact rows' : 'Band above the prompt'
-      return { text: failed ? `Could not set ${verb}: ${failed}` : `${label} ${wanted ? 'on' : 'off'}.` }
+    if (verb === 'compact') {
+      const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !isCompact
+      const failed = await setOption($, 'compact', wanted)
+      return { text: failed ? `Could not set compact: ${failed}` : `Compact rows ${wanted ? 'on' : 'off'}.` }
+    }
+    if (verb === 'band') {
+      // Without an argument the modes cycle; `on` still means what it did when the band was a switch.
+      const given = rest[0] === 'on' ? 'closed' : rest[0]
+      if (given !== undefined && !(BAND_MODES as readonly string[]).includes(given)) return { text: `Band modes: ${BAND_MODES.join(', ')}` }
+      const wanted = given === undefined ? (BAND_MODES[(BAND_MODES.indexOf(band) + 1) % BAND_MODES.length] ?? 'closed') : bandMode(given)
+      const failed = await setOption($, 'band', wanted)
+      return { text: failed ? `Could not set band: ${failed}` : `Band above the prompt: ${BAND_LABELS[wanted]}.` }
     }
     if (verb === 'theme') {
       const name = rest[0]
@@ -725,17 +743,22 @@ export const register: Register = (on, options) => {
               })
             }
           />
-          <Button
-            plain
-            key="band"
-            label={`${hasBand ? GLYPH.done : GLYPH.pending} band`}
-            dimColor={!hasBand}
-            onPress={() =>
-              void setOption($, 'band', !hasBand).then(failed => {
-                if (failed) $.ui.toast(`Could not set band: ${failed}`)
-              })
-            }
-          />
+          <Text dimColor>Band</Text>
+          {(() => {
+            const { Select } = $.ui.resolve(e)
+            return (
+              <Select
+                key="band"
+                value={band}
+                options={BAND_MODES.map(mode => ({ value: mode, label: BAND_LABELS[mode] }))}
+                onSelect={value =>
+                  void setOption($, 'band', value).then(failed => {
+                    if (failed) $.ui.toast(`Could not set band: ${failed}`)
+                  })
+                }
+              />
+            )
+          })()}
         </Box>
       )
 

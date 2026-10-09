@@ -1,6 +1,6 @@
 {
   "name": "session-todo",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "description": "A live todo pane for the session: the agent keeps it current through a tool, you read and tick it without asking.",
   "author": { "name": "Jesper Sahlin", "url": "https://github.com/jepperip" },
   "types": "./types/index.d.ts",
@@ -19,10 +19,11 @@
       "default": false
     },
     "band": {
-      "type": "boolean",
+      "type": "string",
       "title": "Band above the prompt",
-      "description": "While the Todo pane is closed, show the item in progress and the count in a row above the prompt, with a button that opens the pane.",
-      "default": true
+      "description": "When to show the item in progress and the count in a row above the prompt, with a button that opens the pane: off, closed (only while the Todo pane is closed), or always.",
+      "default": "closed",
+      "options": ["off", "closed", "always"]
     }
   }
 }
