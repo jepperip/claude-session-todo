@@ -732,17 +732,6 @@ export const register: Register = (on, options) => {
               />
             )
           })()}
-          <Button
-            plain
-            key="compact"
-            label={`${isCompact ? GLYPH.done : GLYPH.pending} compact`}
-            dimColor={!isCompact}
-            onPress={() =>
-              void setOption($, 'compact', !isCompact).then(failed => {
-                if (failed) $.ui.toast(`Could not set compact: ${failed}`)
-              })
-            }
-          />
           <Text dimColor>Band</Text>
           {(() => {
             const { Select } = $.ui.resolve(e)
@@ -759,6 +748,17 @@ export const register: Register = (on, options) => {
               />
             )
           })()}
+          <Button
+            plain
+            key="compact"
+            label={`${isCompact ? GLYPH.done : GLYPH.pending} compact`}
+            dimColor={!isCompact}
+            onPress={() =>
+              void setOption($, 'compact', !isCompact).then(failed => {
+                if (failed) $.ui.toast(`Could not set compact: ${failed}`)
+              })
+            }
+          />
         </Box>
       )
 
