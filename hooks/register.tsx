@@ -209,6 +209,7 @@ const TOOL_DESCRIPTION = [
   'The todo lists the user watches in the Todo side pane. They are their view of the plan and of your progress, so keep them current without being asked, also when you do every step yourself.',
   'Lists are named (default "main"); items are addressed by id, unique across lists.',
   '- write: replace one list with its steps (list, title, items, optional about). Do this before the first edit, command or search of any task that takes more than one tool call or spans more than one turn; only a single edit or a question answered from memory needs no list. The first list written becomes the active one, drawn first; focus switches it.',
+  '- board (with write): a short name for the whole board, letters, digits, _ and -, such as the ticket or the feature (DAN-1234, release-notes). Give it with the first write of a plan: the pane shares the board under that name with one click. Lists are many, so the board\'s name is its own.',
   `- about (optional, one line of at most ${ABOUT_MAX} characters; a longer one is cut with an ellipsis): one short sentence under the title saying what the list is for or what done looks like, so the user still knows a day later. Not a summary of the items. Set it with write and leave it; describe changes it later.`,
   '- add / update / remove: one item. Mark the step you begin in_progress (prefer one at a time, several when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the user.',
   '- owner: who does the item, "agent" (you; the default) or "user". Mark a step "user" when only the person can take it: approve, decide, click, run something you may not. The pane marks your own items so theirs stand out.',
@@ -224,7 +225,7 @@ const TOOL_SCHEMA = {
   type: 'object',
   properties: {
     action: { type: 'string', enum: ['write', 'add', 'update', 'remove', 'read', 'clear', 'drop', 'focus', 'describe', 'join', 'leave'] },
-    board: { type: 'string', description: 'The shared board to follow (join).' },
+    board: { type: 'string', description: 'With write: a short name for the whole board (letters, digits, _ and -), the name it is shared under. With join: the shared board to follow.' },
     label: { type: 'string', description: `What this session signs its changes on the shared board with (join); at most ${LABEL_MAX} characters.` },
     list: {
       type: 'string',
@@ -267,6 +268,7 @@ const PROMPT_SECTION = {
     `The person watches a live todo pane driven by the \`${TOOL}\` tool. It is how they follow your progress while you work, also when every step is yours and they take none, so a list is wanted whenever the work is more than a moment's.`,
     '',
     '- Before the first edit, command or search of any task that takes more than one tool call, or that spans more than one turn, write the list (action write): the steps as you see them, one short imperative line each. One write is cheap; work the person could not follow is not. Skip it only for a single edit or a question answered from what you already know.',
+    '- Give the board a short name with that first write (board: the ticket or the feature, letters, digits, _ and -). The pane shares the board under it with one click, so other sessions can join the plan.',
     '- Caught mid-task without a list? Write it now, with the finished steps already marked done.',
     '- Mark the step you begin in_progress (one at a time; several only when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the person.',
     '- Add and remove items as the work changes. Keep follow-ups (open the PR, report to Jira, update docs) in a second list so the main plan stays focused.',
@@ -325,7 +327,9 @@ function mapItem(todo: TodoBoard, id: string, change: (item: TodoItem) => TodoIt
 function render(todo: TodoBoard, following?: SharedBoard | null): string {
   const lines: string[] = following
     ? [`Shared board "${following.name}" (this session signs as "${following.label}"): other sessions write here too; add and update, never write over their lists.`]
-    : []
+    : todo.name
+      ? [`Board "${todo.name}" (shareable under that name)`]
+      : []
   if (todo.lists.length === 0) return [...lines, 'Todo: no lists'].join('\n')
   let n = 0
   for (const list of drawn(todo)) {
@@ -438,13 +442,16 @@ async function joinBoard($: EngineInterface, name: string | undefined, label: st
   return { todo, following }
 }
 
-/** Publishes this session's own board under a name and follows it. */
-async function shareBoard($: EngineInterface, name: string | undefined, label: string | undefined): Promise<Joined | string> {
-  if (!name || !isValidName(name)) return `board names are letters, digits, _ and -: ${name ?? '(none)'}`
+/** Publishes this session's own board, under the given name or the board's own, and follows it. */
+async function shareBoard($: EngineInterface, given: string | undefined, label: string | undefined): Promise<Joined | string> {
   const current = await read($, shared)
   if (current) return `this session already follows the shared board ${current.name}; /todo leave first`
+  const own = await read($, board)
+  const name = given ?? own.name
+  if (!name) return 'the board has no name yet: /todo share <name>, or /todo name <name> first'
+  if (!isValidName(name)) return `board names are letters, digits, _ and -: ${name}`
   if (await loadShared($, name)) return `a shared board named ${name} exists; /todo join ${name} follows it`
-  const todo = await read($, board)
+  const todo: TodoBoard = { ...own, name }
   await $.store.set(sharedKey(name), todo)
   const following = { name, label: labelOf(label, await $.session.id()) }
   await follow($, following, todo)
@@ -570,6 +577,8 @@ function applyTool(todo: TodoBoard, input: TodoBoardInput): TodoBoard | string {
     case 'write': {
       const name = input.list ?? todo.active ?? DEFAULT_LIST
       if (!isValidName(name)) return `list names are letters, digits, _ and -: ${name}`
+      if (input.board !== undefined && !isValidName(input.board)) return `board names are letters, digits, _ and -: ${input.board}`
+      const boardName = input.board ?? todo.name
       const existing = listNamed(todo, name)
       const others = todo.lists.filter(list => list !== existing)
       const taken = new Set(others.flatMap(list => list.items.map(item => item.id)))
@@ -591,7 +600,9 @@ function applyTool(todo: TodoBoard, input: TodoBoardInput): TodoBoard | string {
       const list: TodoList = { name: existing?.name ?? name, title: input.title ?? existing?.title ?? name, items }
       if (about) list.about = about
       const lists = existing ? todo.lists.map(one => (one === existing ? list : one)) : [...todo.lists, list]
-      return { lists, active: todo.active ?? list.name, nextId }
+      const written: TodoBoard = { lists, active: todo.active ?? list.name, nextId }
+      if (boardName) written.name = boardName
+      return written
     }
     case 'add': {
       if (!input.text) return 'add needs a text'
@@ -713,7 +724,7 @@ function bandMode(value: unknown): BandMode {
   return 'closed'
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | share <name> [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}]]`
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}]]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
@@ -730,8 +741,8 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, share <name>, join <name>, leave, boards, forget <name>, theme <name>, compact [on|off], band [off|closed|always]',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | share <name> [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <name> | compact [on|off] | band [off|closed|always]]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, name <name>, share [name], join <name>, leave, boards, forget <name>, theme <name>, compact [on|off], band [off|closed|always]',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <name> | compact [on|off] | band [off|closed|always]]',
     })
 
     const sessionId = await $.session.id()
@@ -880,6 +891,12 @@ export const register: Register = (on, options) => {
       return { text: typeof outcome === 'string' ? outcome : render(outcome.todo, outcome.following) }
     }
     if (verb === 'leave') return { text: await leaveBoard($) }
+    if (verb === 'name') {
+      const name = rest[0]
+      if (!name) return { text: todo.name ? `The board is named ${todo.name}.` : 'Usage: /todo name <name>' }
+      if (following) return { text: `This session follows the shared board ${following.name}, which keeps its name.` }
+      return shown(await commit($, todo => (isValidName(name) ? { ...todo, name } : `board names are letters, digits, _ and -: ${name}`)))
+    }
     if (verb === 'boards') return { text: await sharedBoards($) }
     if (verb === 'forget') return { text: await forgetBoard($, rest[0]) }
     if (verb === 'compact') {
@@ -968,10 +985,53 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
+    // The row that shares this board or joins another: one click under the board's own name, a
+    // pick among the boards other sessions shared, or the way back while following one.
+    const boards = following
+      ? []
+      : (await $.store.keys()).filter(key => key.startsWith(SHARED_PREFIX)).map(key => key.slice(SHARED_PREFIX.length))
+    const canShare = todo.name !== undefined && lists.some(list => list.items.length > 0)
+    const toastIfRefused = (outcome: Joined | string) => {
+      if (typeof outcome === 'string') $.ui.toast(outcome)
+    }
+    const sharing = following ? (
+      <Box flexDirection="row" gap={1} marginBottom={1}>
+        <Text dimColor wrap="truncate-end">
+          {`⇄ shared board ${following.name} · signs as ${following.label}`}
+        </Text>
+        <Button plain key="leave" label="leave" onPress={() => void leaveBoard($)} />
+      </Box>
+    ) : canShare || boards.length > 0 ? (
+      <Box flexDirection="row" gap={2} marginBottom={1}>
+        {canShare && (
+          <Button key="share" label={`⇄ share as ${todo.name}`} onPress={() => void shareBoard($, undefined, undefined).then(toastIfRefused)} />
+        )}
+        {boards.length > 0 &&
+          e.surface !== 'mobile' &&
+          (() => {
+            const { Select } = $.ui.resolve(e)
+            return (
+              <Select
+                key="join"
+                label="join"
+                value=""
+                options={[{ value: '', label: '…' }, ...boards.map(name => ({ value: name, label: name }))]}
+                onSelect={value => {
+                  if (value) void joinBoard($, value, undefined).then(toastIfRefused)
+                }}
+              />
+            )
+          })()}
+      </Box>
+    ) : null
+
     let n = 0
     return (
       <Box flexDirection="column" paddingX={1} minHeight={e.props.scroll.bodyRows}>
-        <Box flexDirection="row" justifyContent="flex-end">
+        <Box flexDirection="row" justifyContent="space-between" gap={2}>
+          <Text dimColor wrap="truncate-end">
+            {todo.name ? `board ${todo.name}` : ''}
+          </Text>
           <Button
             plain
             key="settings"
@@ -981,13 +1041,7 @@ export const register: Register = (on, options) => {
           />
         </Box>
         {settings}
-        {following && (
-          <Box marginBottom={1}>
-            <Text dimColor wrap="wrap">
-              {`⇄ shared board ${following.name} · this session signs as ${following.label}`}
-            </Text>
-          </Box>
-        )}
+        {sharing}
         {lists.length === 0 && (
           <Text dimColor wrap="wrap">
             Nothing planned yet. The agent fills this in as work is planned; /todo add adds your own.

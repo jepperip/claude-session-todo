@@ -182,6 +182,21 @@ test('a change on a shared board is applied over what other sessions wrote since
   expect(answer.result).toContain('[ ] 1. One (one)\n')
 })
 
+test('a board named by the agent shares under that name without an argument', async ($, on) => {
+  const stored = engine(on)
+  const refused = await $.command.run({ command: 'todo', args: 'share' })
+  expect(refused.text).toContain('the board has no name yet')
+
+  const answer = await $.tool.call({ tool: TOOL, action: 'write', board: 'DAN-1234', list: 'plan', items: [{ text: 'One' }] })
+  expect(answer.result).toContain('Board "DAN-1234" (shareable under that name)')
+  const { text } = await $.command.run({ command: 'todo', args: 'share' })
+  expect(text).toContain('Shared board "DAN-1234"')
+  expect(stored.has('shared:DAN-1234')).toBe(true)
+
+  const renamed = await $.command.run({ command: 'todo', args: 'name other' })
+  expect(renamed.text).toContain('follows the shared board DAN-1234, which keeps its name')
+})
+
 test('join follows an existing shared board and refuses a missing one', async ($, on) => {
   const stored = engine(on)
   stored.set('shared:plan', { lists: [{ name: 'plan', title: 'The plan', items: [{ id: 'p1', text: 'Step', status: 'pending' }] }], nextId: 2 })

@@ -29,6 +29,8 @@ export type TodoList = {
 }
 
 export type TodoBoard = {
+  /** A short name for the whole board, given by the agent with the plan; the shared board's name when the person shares it. */
+  name?: string
   /** In creation order; the active list is drawn first whatever its position. */
   lists: TodoList[]
   /** The name of the list the agent is working in, drawn first with a bold title. */
