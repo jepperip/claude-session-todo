@@ -7,9 +7,14 @@ type Engine = Parameters<Body>[0]
 type On = Parameters<Body>[1]
 
 /** What the kit leaves unanswered beneath the plugin: the clock, the store, the session id, the status line and the pane. */
-function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeof mock.clock> } {
+function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeof mock.clock>; toasts: string[] } {
   const clock = mock.clock(on)
   const stored = new Map<string, unknown>()
+  const toasts: string[] = []
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('store.get', (_$, e) => ({ value: stored.get(e.key) }))
   on('store.set', (_$, e) => {
     stored.set(e.key, e.value)
@@ -29,7 +34,7 @@ function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeo
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
   // The poll of a shared board never fires here: the mock clock stands still, and a test writes
   // the store itself in another session's stead.
-  return { stored, clock }
+  return { stored, clock, toasts }
 }
 
 /** The lists as the tool renders them for the model: the pane's text, one line per list and item. */
@@ -237,4 +242,59 @@ test('join follows an existing shared board and refuses a missing one', async ($
   await $.tool.call({ tool: TOOL, action: 'update', id: 'p1', status: 'done' })
   const published = stored.get('shared:plan') as { lists: Array<{ items: Array<{ id: string; status: string; by?: string }> }> }
   expect(published.lists[0]?.items[0]).toMatchObject({ id: 'p1', status: 'done', by: 'test-s' })
+})
+
+test('an item that starts waiting on the person is toasted once; their own changes never toast', async ($, on) => {
+  const { toasts } = engine(on)
+  await $.tool.call({
+    tool: TOOL,
+    action: 'write',
+    list: 'main',
+    title: 'Plan',
+    items: [
+      { id: 'a', text: 'Build', status: 'in_progress' },
+      { id: 'b', text: 'Ship' },
+      { id: 'c', text: 'Approve the plan', owner: 'user' },
+    ],
+  })
+  expect(toasts).toEqual([])
+
+  // Blocked by the agent: one toast, and none again while it stays blocked.
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'a', status: 'blocked', note: 'needs the password' })
+  expect(toasts).toEqual(['♟ needs you: Build'])
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'a', note: 'still needs it' })
+  expect(toasts).toHaveLength(1)
+
+  // The person finishes it themselves, and starts their own item themselves: no toast for either.
+  await $.command.run({ command: 'todo', args: 'done 1' })
+  await $.command.run({ command: 'todo', args: 'start 3' })
+  expect(toasts).toHaveLength(1)
+  await $.command.run({ command: 'todo', args: 'done 3' })
+
+  // The agent starts a step of the person's: that is a poke.
+  await $.tool.call({ tool: TOOL, action: 'add', text: 'Approve the release', owner: 'user', status: 'in_progress' })
+  expect(toasts).toEqual(['♟ needs you: Build', '♟ needs you: Approve the release'])
+})
+
+test('the agent finishing a step that puts one of the person\'s up next pokes them', async ($, on) => {
+  const { toasts } = engine(on)
+  await $.tool.call({
+    tool: TOOL,
+    action: 'write',
+    list: 'main',
+    title: 'Plan',
+    items: [
+      { id: 'a', text: 'Build', status: 'in_progress' },
+      { id: 'b', text: 'Click deploy', owner: 'user' },
+    ],
+  })
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'a', status: 'done' })
+  expect(toasts).toEqual(['♟ needs you: Click deploy'])
+})
+
+test('notify off keeps the toast away', { options: { notify: false } }, async ($, on) => {
+  const { toasts } = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'main', title: 'Plan', items: [{ id: 'a', text: 'Build', status: 'in_progress' }] })
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'a', status: 'blocked' })
+  expect(toasts).toEqual([])
 })

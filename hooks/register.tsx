@@ -22,6 +22,8 @@ const POLL_MS = 2000
 const LABEL_MAX = 20
 /** How long a stored board may go without a write before a session start prunes it. */
 const KEEP_MS = 30 * 24 * 60 * 60 * 1000
+/** How long the toast about an item waiting on the person stays; longer than the default, since it is the one thing not to miss. */
+const TOAST_MS = 8000
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'done', 'blocked']
 
@@ -303,6 +305,36 @@ function itemById(todo: TodoBoard, id: string | undefined): TodoItem | undefined
   return id ? allItems(todo).find(item => item.id === id) : undefined
 }
 
+/**
+ * The items the person has to act on now: every blocked one (the agent marks a step blocked when
+ * it waits on them), and their own that are up: in progress, or next when nothing is in progress.
+ */
+function waitingOnYou(todo: TodoBoard): TodoItem[] {
+  const items = allItems(todo)
+  const waiting = items.filter(item => item.status === 'blocked' || (item.owner === 'user' && item.status === 'in_progress'))
+  if (!items.some(item => item.status === 'in_progress')) {
+    const next = items.find(item => item.status === 'pending')
+    if (next?.owner === 'user') waiting.push(next)
+  }
+  return waiting
+}
+
+/** Whether a toast names an item that starts waiting on the person; set from the plugin's options on load. */
+let notifies = true
+
+/**
+ * Toasts the person when an item starts waiting on them between two states of the board, once
+ * per item, unless turned off. The band and the pane show the item in their colour either way.
+ */
+function pokeFor($: EngineInterface, before: TodoBoard, after: TodoBoard): void {
+  if (!notifies) return
+  const was = new Set(waitingOnYou(before).map(item => item.id))
+  const fresh = waitingOnYou(after).filter(item => !was.has(item.id))
+  const first = fresh[0]
+  if (!first) return
+  $.ui.toast(`${USER_MARK} needs you: ${first.text}${fresh.length > 1 ? ` (+${fresh.length - 1})` : ''}`, { timeoutMs: TOAST_MS })
+}
+
 /** Lists in the order the pane draws them: the active one first, then creation order. */
 function drawn(todo: TodoBoard): TodoList[] {
   const active = todo.active ? listNamed(todo, todo.active) : undefined
@@ -444,7 +476,9 @@ async function pull($: EngineInterface, name: string): Promise<void> {
   const fresh = await loadShared($, name)
   if (!fresh) return
   const held = await read($, board)
-  if (JSON.stringify(fresh) !== JSON.stringify(held)) await update($, board, () => fresh)
+  if (JSON.stringify(fresh) === JSON.stringify(held)) return
+  await update($, board, () => fresh)
+  pokeFor($, held, fresh)
 }
 
 async function follow($: EngineInterface, following: SharedBoard, todo: TodoBoard): Promise<void> {
@@ -542,9 +576,10 @@ const JUST_DONE_MS = 2000
 /**
  * Applies a change and persists the board: the session's own in its store slot, or the shared
  * one, re-read from the store first so that what other sessions wrote since the last poll is
- * kept under the change. Resolves to the change's refusal when it gives one.
+ * kept under the change. Resolves to the change's refusal when it gives one. A change the
+ * person made themselves (a command, a click) never pokes them about what it put up next.
  */
-async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard | string): Promise<TodoBoard | string> {
+async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard | string, byPerson = false): Promise<TodoBoard | string> {
   const following = await read($, shared)
   const held = await read($, board)
   const base = following ? ((await loadShared($, following.name)) ?? held) : held
@@ -567,6 +602,7 @@ async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard
     await update($, justDone, () => ({ id: finished.id, text: finished.text }))
     $.clock.after(JUST_DONE_MS, () => void update($, justDone, held => (held?.id === finished.id ? null : held)))
   }
+  if (!byPerson) pokeFor($, held, todo)
   return todo
 }
 
@@ -763,12 +799,13 @@ function bandMode(value: unknown): BandMode {
   return 'closed'
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}]]`
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}] | notify [on|off]]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
   const isCompact = options.compact === true
   const band = bandMode(options.band)
+  notifies = options.notify !== false
   const theme = THEMES[themeKey] as Theme
 
   on('session.start', async ($, e, next) => {
@@ -780,8 +817,8 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, name <name>, share [name], join <name>, leave, boards, forget <name>, theme <name>, compact [on|off], band [off|closed|always]',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <name> | compact [on|off] | band [off|closed|always]]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, name <name>, share [name], join <name>, leave, boards, forget <name>, theme <name>, compact [on|off], band [off|closed|always], notify [on|off]',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <name> | compact [on|off] | band [off|closed|always] | notify [on|off]]',
     })
 
     const sessionId = await $.session.id()
@@ -835,16 +872,23 @@ export const register: Register = (on, options) => {
     // An item that just went from in progress to done holds the band for a moment, ticked, before
     // the next item takes its place.
     const finished = await read($, justDone)
-    const glyph = finished ? GLYPH.done : current.length > 0 ? GLYPH.in_progress : GLYPH.pending
-    const glyphColor = finished ? theme.status.done : current.length > 0 ? theme.status.in_progress : undefined
-    const label = finished ? `DONE: ${finished.text}` : now
+    // An item waiting on the person takes the band over everything else, in their colour.
+    const waiting = waitingOnYou(todo)
+    const you = waiting[0]
+    const glyph = you ? USER_MARK : finished ? GLYPH.done : current.length > 0 ? GLYPH.in_progress : GLYPH.pending
+    const glyphColor = you ? USER_MARK_COLOR : finished ? theme.status.done : current.length > 0 ? theme.status.in_progress : undefined
+    const label = you
+      ? `${you.text}${waiting.length > 1 ? ` (+${waiting.length - 1})` : ''}`
+      : finished
+        ? `DONE: ${finished.text}`
+        : now
     return (
       <Box flexDirection="row" justifyContent="space-between" gap={2}>
         <Box flexDirection="row" gap={1} minWidth={0}>
-          <Text bold color={glyphColor} dimColor={isIdle && !finished}>
-            {glyph}
+          <Text bold color={glyphColor} dimColor={isIdle && !finished && !you}>
+            {you ? `${USER_MARK} NEEDS YOU:` : glyph}
           </Text>
-          {isIdle && !finished ? (
+          {isIdle && !finished && !you ? (
             <Text wrap="truncate-end" dimColor>
               {label}
             </Text>
@@ -895,18 +939,18 @@ export const register: Register = (on, options) => {
       const list = rest[0]?.startsWith('@') ? rest.shift()?.slice(1) : undefined
       const text = rest.join(' ')
       if (!text) return { text: 'Usage: /todo add [@list] <text>' }
-      const outcome = await commit($, todo => applyTool(todo, { action: 'add', list, text, owner: 'user' }))
+      const outcome = await commit($, todo => applyTool(todo, { action: 'add', list, text, owner: 'user' }), true)
       if (typeof outcome !== 'string') await openPane($)
       return shown(outcome)
     }
     if (verb === 'clear' || verb === 'drop' || verb === 'focus') {
-      return shown(await commit($, todo => applyTool(todo, { action: verb, list: rest[0] })))
+      return shown(await commit($, todo => applyTool(todo, { action: verb, list: rest[0] }), true))
     }
     if (verb === 'about') {
       const [list, ...words] = rest
       if (!list) return { text: 'Usage: /todo about <list> [text]  (no text clears it)' }
       const fitted = fitAbout(words.join(' '))
-      const outcome = await commit($, todo => applyTool(todo, { action: 'describe', list, about: fitted.about }))
+      const outcome = await commit($, todo => applyTool(todo, { action: 'describe', list, about: fitted.about }), true)
       const { text } = shown(outcome)
       return { text: fitted.note && typeof outcome !== 'string' ? `${text}\n(${fitted.note})` : text }
     }
@@ -915,13 +959,16 @@ export const register: Register = (on, options) => {
       const target = byNumber(todo, arg)
       if (!target) return { text: `No item ${arg || '(none)'}. Items are numbered as the pane shows them.` }
       return shown(
-        await commit($, todo =>
-          applyTool(
-            todo,
-            verb === 'remove'
-              ? { action: 'remove', id: target.id }
-              : { action: 'update', id: target.id, status: verb === 'start' ? 'in_progress' : 'done' },
-          ),
+        await commit(
+          $,
+          todo =>
+            applyTool(
+              todo,
+              verb === 'remove'
+                ? { action: 'remove', id: target.id }
+                : { action: 'update', id: target.id, status: verb === 'start' ? 'in_progress' : 'done' },
+            ),
+          true,
         ),
       )
     }
@@ -935,7 +982,7 @@ export const register: Register = (on, options) => {
       const name = rest[0]
       if (!name) return { text: todo.name ? `The board is named ${todo.name}.` : 'Usage: /todo name <name>' }
       if (following) return { text: `This session follows the shared board ${following.name}, which keeps its name.` }
-      return shown(await commit($, todo => (isValidName(name) ? { ...todo, name } : `board names are letters, digits, _ and -: ${name}`)))
+      return shown(await commit($, todo => (isValidName(name) ? { ...todo, name } : `board names are letters, digits, _ and -: ${name}`), true))
     }
     if (verb === 'boards') return { text: await sharedBoards($) }
     if (verb === 'forget') return { text: await forgetBoard($, rest[0]) }
@@ -943,6 +990,11 @@ export const register: Register = (on, options) => {
       const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !isCompact
       const failed = await setOption($, 'compact', wanted)
       return { text: failed ? `Could not set compact: ${failed}` : `Compact rows ${wanted ? 'on' : 'off'}.` }
+    }
+    if (verb === 'notify') {
+      const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !notifies
+      const failed = await setOption($, 'notify', wanted)
+      return { text: failed ? `Could not set notify: ${failed}` : `Toast when an item needs you: ${wanted ? 'on' : 'off'}. The band and the pane show it either way.` }
     }
     if (verb === 'band') {
       // Without an argument the modes cycle; `on` still means what it did when the band was a switch.
@@ -966,9 +1018,10 @@ export const register: Register = (on, options) => {
     const todo = await read($, board)
     const lists = drawn(todo)
     const current = lists.flatMap(list => list.items).filter(item => item.status === 'in_progress')
+    const waiting = waitingOnYou(todo)
 
     const toggle = (item: TodoItem) => () =>
-      void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })))
+      void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })), true)
 
     // The bar sits in the title row, so it stays short: a sixth of the pane, between 8 and 18 cells.
     const barWidth = Math.max(4, Math.round(Math.min(18, Math.max(8, Math.round(e.props.bodyColumns / 6))) * (theme.barScale ?? 1)))
@@ -1019,6 +1072,17 @@ export const register: Register = (on, options) => {
             onPress={() =>
               void setOption($, 'compact', !isCompact).then(failed => {
                 if (failed) $.ui.toast(`Could not set compact: ${failed}`)
+              })
+            }
+          />
+          <Button
+            plain
+            key="notify"
+            label={`${notifies ? GLYPH.done : GLYPH.pending} notify`}
+            dimColor={!notifies}
+            onPress={() =>
+              void setOption($, 'notify', !notifies).then(failed => {
+                if (failed) $.ui.toast(`Could not set notify: ${failed}`)
               })
             }
           />
@@ -1166,13 +1230,20 @@ export const register: Register = (on, options) => {
             </Box>
           )
         })}
-        {current.length > 0 && (
+        {(waiting.length > 0 || current.length > 0) && (
           <Box flexDirection="column" marginTop={1}>
-            {current.map(item => (
-              <Text key={`now:${item.id}`} dimColor={!theme.accent} color={theme.accent} wrap="wrap">
-                {`now: ${item.text}`}
+            {waiting.map(item => (
+              <Text key={`you:${item.id}`} bold color={USER_MARK_COLOR} wrap="wrap">
+                {`${USER_MARK} needs you: ${item.text}${item.note ? ` — ${item.note}` : ''}`}
               </Text>
             ))}
+            {current
+              .filter(item => !waiting.includes(item))
+              .map(item => (
+                <Text key={`now:${item.id}`} dimColor={!theme.accent} color={theme.accent} wrap="wrap">
+                  {`now: ${item.text}`}
+                </Text>
+              ))}
           </Box>
         )}
         <Box flexGrow={1} />

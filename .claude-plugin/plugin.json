@@ -1,6 +1,6 @@
 {
   "name": "session-todo",
-  "version": "0.2.28",
+  "version": "0.2.29",
   "description": "A live todo pane for the session: the agent keeps it current through a tool, you read and tick it without asking.",
   "author": { "name": "Jesper Sahlin", "url": "https://github.com/jepperip" },
   "types": "./types/index.d.ts",
@@ -24,6 +24,12 @@
       "description": "When to show the item in progress and the count in a row above the prompt, with a button that opens the pane: off, closed (only while the Todo pane is closed), or always.",
       "default": "closed",
       "options": ["off", "closed", "always"]
+    },
+    "notify": {
+      "type": "boolean",
+      "title": "Toast when an item needs you",
+      "description": "Show a toast when a step starts waiting on you: the agent marked it blocked, or one of yours is up. The band and the pane show it in your colour either way.",
+      "default": true
     }
   }
 }
