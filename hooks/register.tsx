@@ -14,7 +14,6 @@ const settingsOpen = atom({ plugin: 'session-todo', key: 'settingsOpen' } as con
 const justDone = atom({ plugin: 'session-todo', key: 'justDone' } as const, null)
 const paneAutoOpened = atom({ plugin: 'session-todo', key: 'paneAutoOpened' } as const, false)
 const shared = atom({ plugin: 'session-todo', key: 'shared' } as const, null)
-const shareMenu = atom({ plugin: 'session-todo', key: 'shareMenu' } as const, 'closed')
 const THEME_FIELD = 'theme'
 
 /** How often a session following a shared board reads it back from the store for other sessions' writes. */
@@ -986,53 +985,40 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-    // The ⇄ menu beside ⚙: share this board under its own name, join one another session
-    // shared (the row unfolds to the boards), or leave the one followed. Drawn inline under the
-    // top row, as the settings are; the row's left side names the board, own or shared.
-    const menu = await read($, shareMenu)
-    const boards =
-      following || menu === 'closed'
-        ? []
-        : (await $.store.keys()).filter(key => key.startsWith(SHARED_PREFIX)).map(key => key.slice(SHARED_PREFIX.length))
+    // The controls beside ⚙: share this board under its own name, join one another session
+    // shared, or leave the one followed. The row's left side names the board, own or shared.
+    const boards = following
+      ? []
+      : (await $.store.keys()).filter(key => key.startsWith(SHARED_PREFIX)).map(key => key.slice(SHARED_PREFIX.length))
     const canShare = todo.name !== undefined && lists.some(list => list.items.length > 0)
-    const closeMenu = () => update($, shareMenu, () => 'closed')
-    const done = (outcome: Joined | string) => {
+    const toastIfRefused = (outcome: Joined | string) => {
       if (typeof outcome === 'string') $.ui.toast(outcome)
-      void closeMenu()
     }
     const heading = following ? `⇄ ${following.name} · signs as ${following.label}` : todo.name ? `board ${todo.name}` : ''
-    const shareRows =
-      menu === 'closed' ? null : (
-        <Box flexDirection="column" marginBottom={1}>
-          {following ? (
-            <Button plain key="leave" label={`Leave ${following.name}`} onPress={() => void leaveBoard($).then(() => void closeMenu())} />
-          ) : (
-            <Box flexDirection="column">
-              {canShare ? (
-                <Button plain key="share" label={`Share ${todo.name}`} onPress={() => void shareBoard($, undefined, undefined).then(done)} />
-              ) : (
-                <Text dimColor>{todo.name ? 'Share: nothing on the board yet' : 'Share: the agent names the board first (/todo name <name>)'}</Text>
-              )}
-              {boards.length > 0 ? (
-                <Button
-                  plain
-                  key="join"
-                  label={menu === 'join' ? 'Join ▾' : 'Join ▸'}
-                  onPress={() => void update($, shareMenu, open => (open === 'join' ? 'open' : 'join'))}
-                />
-              ) : (
-                <Text dimColor>Join: no shared boards</Text>
-              )}
-              {menu === 'join' &&
-                boards.map(name => (
-                  <Box key={`join:${name}`} paddingLeft={2}>
-                    <Button plain key={`join:${name}`} label={name} onPress={() => void joinBoard($, name, undefined).then(done)} />
-                  </Box>
-                ))}
-            </Box>
-          )}
-        </Box>
-      )
+    const controls = following ? (
+      <Button plain key="leave" label="leave" onPress={() => void leaveBoard($)} />
+    ) : (
+      <Box flexDirection="row" gap={2}>
+        {canShare && (
+          <Button plain key="share" label={`⇄ share ${todo.name}`} onPress={() => void shareBoard($, undefined, undefined).then(toastIfRefused)} />
+        )}
+        {boards.length > 0 &&
+          e.surface !== 'mobile' &&
+          (() => {
+            const { Select } = $.ui.resolve(e)
+            return (
+              <Select
+                key="join"
+                value=""
+                options={[{ value: '', label: 'join…' }, ...boards.map(name => ({ value: name, label: name }))]}
+                onSelect={value => {
+                  if (value) void joinBoard($, value, undefined).then(toastIfRefused)
+                }}
+              />
+            )
+          })()}
+      </Box>
+    )
 
     let n = 0
     return (
@@ -1042,13 +1028,7 @@ export const register: Register = (on, options) => {
             {heading}
           </Text>
           <Box flexDirection="row" gap={2} flexShrink={0}>
-            <Button
-              plain
-              key="share-menu"
-              label="⇄"
-              dimColor={menu === 'closed'}
-              onPress={() => void update($, shareMenu, open => (open === 'closed' ? 'open' : 'closed'))}
-            />
+            {controls}
             <Button
               plain
               key="settings"
@@ -1058,7 +1038,6 @@ export const register: Register = (on, options) => {
             />
           </Box>
         </Box>
-        {shareRows}
         {settings}
         {lists.length === 0 && (
           <Text dimColor wrap="wrap">

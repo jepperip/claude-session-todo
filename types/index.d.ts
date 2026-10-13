@@ -51,8 +51,6 @@ declare module 'claude-code' {
       paneAutoOpened: boolean
       /** The shared board this session follows instead of its own, or null. */
       shared: SharedBoard | null
-      /** The ⇄ menu in the pane: closed, open, or open with the join row unfolded to the shared boards. */
-      shareMenu: 'closed' | 'open' | 'join'
     }
   }
 }
