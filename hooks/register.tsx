@@ -985,8 +985,8 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-    // The row that shares this board or joins another: one click under the board's own name, a
-    // pick among the boards other sessions shared, or the way back while following one.
+    // The controls beside ⚙: share this board under its own name, join one another session
+    // shared, or leave the one followed. The row's left side names the board, own or shared.
     const boards = following
       ? []
       : (await $.store.keys()).filter(key => key.startsWith(SHARED_PREFIX)).map(key => key.slice(SHARED_PREFIX.length))
@@ -994,17 +994,13 @@ export const register: Register = (on, options) => {
     const toastIfRefused = (outcome: Joined | string) => {
       if (typeof outcome === 'string') $.ui.toast(outcome)
     }
-    const sharing = following ? (
-      <Box flexDirection="row" gap={1} marginBottom={1}>
-        <Text dimColor wrap="truncate-end">
-          {`⇄ shared board ${following.name} · signs as ${following.label}`}
-        </Text>
-        <Button plain key="leave" label="leave" onPress={() => void leaveBoard($)} />
-      </Box>
-    ) : canShare || boards.length > 0 ? (
-      <Box flexDirection="row" gap={2} marginBottom={1}>
+    const heading = following ? `⇄ ${following.name} · signs as ${following.label}` : todo.name ? `board ${todo.name}` : ''
+    const controls = following ? (
+      <Button plain key="leave" label="leave" onPress={() => void leaveBoard($)} />
+    ) : (
+      <Box flexDirection="row" gap={2}>
         {canShare && (
-          <Button key="share" label={`⇄ share as ${todo.name}`} onPress={() => void shareBoard($, undefined, undefined).then(toastIfRefused)} />
+          <Button plain key="share" label={`⇄ share ${todo.name}`} onPress={() => void shareBoard($, undefined, undefined).then(toastIfRefused)} />
         )}
         {boards.length > 0 &&
           e.surface !== 'mobile' &&
@@ -1013,9 +1009,8 @@ export const register: Register = (on, options) => {
             return (
               <Select
                 key="join"
-                label="join"
                 value=""
-                options={[{ value: '', label: '…' }, ...boards.map(name => ({ value: name, label: name }))]}
+                options={[{ value: '', label: 'join…' }, ...boards.map(name => ({ value: name, label: name }))]}
                 onSelect={value => {
                   if (value) void joinBoard($, value, undefined).then(toastIfRefused)
                 }}
@@ -1023,25 +1018,27 @@ export const register: Register = (on, options) => {
             )
           })()}
       </Box>
-    ) : null
+    )
 
     let n = 0
     return (
       <Box flexDirection="column" paddingX={1} minHeight={e.props.scroll.bodyRows}>
         <Box flexDirection="row" justifyContent="space-between" gap={2}>
           <Text dimColor wrap="truncate-end">
-            {todo.name ? `board ${todo.name}` : ''}
+            {heading}
           </Text>
-          <Button
-            plain
-            key="settings"
-            label="⚙"
-            dimColor={!isSettingsOpen}
-            onPress={() => void update($, settingsOpen, open => !open)}
-          />
+          <Box flexDirection="row" gap={2} flexShrink={0}>
+            {controls}
+            <Button
+              plain
+              key="settings"
+              label="⚙"
+              dimColor={!isSettingsOpen}
+              onPress={() => void update($, settingsOpen, open => !open)}
+            />
+          </Box>
         </Box>
         {settings}
-        {sharing}
         {lists.length === 0 && (
           <Text dimColor wrap="wrap">
             Nothing planned yet. The agent fills this in as work is planned; /todo add adds your own.
