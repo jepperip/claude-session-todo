@@ -195,9 +195,9 @@ type TodoToolInput = {
 type TodoOwner = NonNullable<TodoItem['owner']>
 
 const TOOL_DESCRIPTION = [
-  'The todo lists the user watches in the Todo side pane. They are their view of the plan, so keep them current without being asked.',
+  'The todo lists the user watches in the Todo side pane. They are their view of the plan and of your progress, so keep them current without being asked, also when you do every step yourself.',
   'Lists are named (default "main"); items are addressed by id, unique across lists.',
-  '- write: replace one list with its steps (list, title, items, optional about). Do this before work with three or more steps, or that spans more than one turn, starts. The first list written becomes the active one, drawn first; focus switches it.',
+  '- write: replace one list with its steps (list, title, items, optional about). Do this before the first edit, command or search of any task that takes more than one tool call or spans more than one turn; only a single edit or a question answered from memory needs no list. The first list written becomes the active one, drawn first; focus switches it.',
   `- about (optional, one line of at most ${ABOUT_MAX} characters; a longer one is cut with an ellipsis): one short sentence under the title saying what the list is for or what done looks like, so the user still knows a day later. Not a summary of the items. Set it with write and leave it; describe changes it later.`,
   '- add / update / remove: one item. Mark the step you begin in_progress (prefer one at a time, several when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the user.',
   '- owner: who does the item, "agent" (you; the default) or "user". Mark a step "user" when only the person can take it: approve, decide, click, run something you may not. The pane marks your own items so theirs stand out.',
@@ -249,7 +249,15 @@ const PROMPT_SECTION = {
   scope: 'session',
   text: [
     '# Session todo pane',
-    `The user sees live todo lists driven by the \`${TOOL}\` tool. Use it instead of narrating the plan: write the steps before any work with three or more steps or that will span more than one turn (a single edit needs no list), mark the step you work on in_progress (prefer one at a time), mark it done the moment it finishes, and add or remove items as the work changes. Keep follow-ups (open the PR, report to Jira, update docs) in a separate list so the main plan stays focused. A list may carry an optional \`about\`: one short sentence on what it is for, set when the list is written and then left alone. Before reporting a task finished, leave its list true: every item done, and items that fell away removed. The pane is the user's way of seeing what is left without asking, so a stale list is worse than none. After a context compaction, call read to recover the lists.`,
+    `The person watches a live todo pane driven by the \`${TOOL}\` tool. It is how they follow your progress while you work, also when every step is yours and they take none, so a list is wanted whenever the work is more than a moment's.`,
+    '',
+    '- Before the first edit, command or search of any task that takes more than one tool call, or that spans more than one turn, write the list (action write): the steps as you see them, one short imperative line each. One write is cheap; work the person could not follow is not. Skip it only for a single edit or a question answered from what you already know.',
+    '- Caught mid-task without a list? Write it now, with the finished steps already marked done.',
+    '- Mark the step you begin in_progress (one at a time; several only when work really runs in parallel), done the moment it finishes, blocked with a note when it waits on the person.',
+    '- Add and remove items as the work changes. Keep follow-ups (open the PR, report to Jira, update docs) in a second list so the main plan stays focused.',
+    '- A list may carry an optional about: one short sentence on what it is for, set when the list is written and then left alone.',
+    '- Before reporting a task finished, leave its list true: every item done, items that fell away removed. A stale list is worse than none.',
+    '- After a context compaction, call read to recover the lists.',
   ].join('\n'),
 } as const
 
