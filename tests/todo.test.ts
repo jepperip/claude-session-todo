@@ -7,17 +7,25 @@ type Engine = Parameters<Body>[0]
 type On = Parameters<Body>[1]
 
 /** What the kit leaves unanswered beneath the plugin: the store, the session id, the status line and the pane. */
-function engine(on: On): void {
+function engine(on: On): Map<string, unknown> {
   const stored = new Map<string, unknown>()
   on('store.get', (_$, e) => ({ value: stored.get(e.key) }))
   on('store.set', (_$, e) => {
     stored.set(e.key, e.value)
     return { value: undefined }
   })
+  on('store.delete', (_$, e) => {
+    stored.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...stored.keys()] }))
+  // The poll of a shared board never fires here: a test writes the store itself in another session's stead.
+  on('clock.every', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'test-session' }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  return stored
 }
 
 /** The lists as the tool renders them for the model: the pane's text, one line per list and item. */
@@ -129,4 +137,61 @@ test('/todo add targets a list with @name and done counts items in pane order', 
   expect(text).toContain('[ ] 1. Write the docs (')
   expect(text).toContain('[followup] 1/1 done')
   expect(text).toContain('[x] 2. Open the PR (')
+})
+
+test('share publishes the own board, changes go to the shared one signed, and leave restores the own board', async ($, on) => {
+  const stored = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'plan', items: [{ id: 'one', text: 'One' }] })
+  const { text: sharedText } = await $.command.run({ command: 'todo', args: 'share plan as planner' })
+  expect(sharedText).toContain('Shared board "plan" (this session signs as "planner")')
+  expect(stored.has('shared:plan')).toBe(true)
+
+  await $.command.run({ command: 'todo', args: 'add Two' })
+  const published = stored.get('shared:plan') as { lists: Array<{ items: Array<{ text: string; by?: string }> }> }
+  const two = published.lists[0]?.items.find(item => item.text === 'Two')
+  expect(two?.by).toBe('planner')
+  const own = stored.get('board:test-session') as { lists: Array<{ items: unknown[] }> }
+  expect(own.lists[0]?.items).toHaveLength(1)
+
+  const { text: left } = await $.command.run({ command: 'todo', args: 'leave' })
+  expect(left).toContain('Left the shared board plan')
+  const text = await shown($)
+  expect(text).toContain('One (one)')
+  expect(text).not.toContain('Two')
+  expect(text).not.toContain('Shared board')
+})
+
+test('a change on a shared board is applied over what other sessions wrote since the last poll', async ($, on) => {
+  const stored = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'plan', items: [{ id: 'one', text: 'One' }] })
+  await $.command.run({ command: 'todo', args: 'share plan as planner' })
+
+  // Another session adds an item straight into the store, as its own commit would.
+  const published = stored.get('shared:plan') as { lists: Array<{ items: object[] }>; nextId: number }
+  const first = published.lists[0]
+  if (!first) throw new Error('no list published')
+  stored.set('shared:plan', {
+    ...published,
+    lists: [{ ...first, items: [...first.items, { id: 'x9', text: 'Theirs', status: 'in_progress', owner: 'agent', by: 'worker' }] }],
+    nextId: 99,
+  })
+
+  const answer = await $.tool.call({ tool: TOOL, action: 'add', text: 'Mine' })
+  expect(answer.result).toContain('[>] 2. Theirs (x9) @worker')
+  expect(answer.result).toContain('3. Mine (t99) @planner')
+  expect(answer.result).toContain('[ ] 1. One (one)\n')
+})
+
+test('join follows an existing shared board and refuses a missing one', async ($, on) => {
+  const stored = engine(on)
+  stored.set('shared:plan', { lists: [{ name: 'plan', title: 'The plan', items: [{ id: 'p1', text: 'Step', status: 'pending' }] }], nextId: 2 })
+  const refused = await $.tool.call({ tool: TOOL, action: 'join', board: 'nope' })
+  expect(refused.deny).toContain('no shared board named nope')
+
+  const joined = await $.tool.call({ tool: TOOL, action: 'join', board: 'plan' })
+  expect(joined.result).toContain('Shared board "plan" (this session signs as "test-s")')
+  expect(joined.result).toContain('The plan [plan]')
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'p1', status: 'done' })
+  const published = stored.get('shared:plan') as { lists: Array<{ items: Array<{ id: string; status: string; by?: string }> }> }
+  expect(published.lists[0]?.items[0]).toMatchObject({ id: 'p1', status: 'done', by: 'test-s' })
 })

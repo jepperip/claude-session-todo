@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { TodoBoard, TodoItem, TodoList, TodoStatus } from '../types'
+import type { SharedBoard, TodoBoard, TodoItem, TodoList, TodoStatus } from '../types'
 
 const PANE = 'session-todo'
 const TOOL = 'mcp__session-todo__todo'
@@ -13,7 +13,13 @@ const board = atom({ plugin: 'session-todo', key: 'board' } as const, EMPTY)
 const settingsOpen = atom({ plugin: 'session-todo', key: 'settingsOpen' } as const, false)
 const justDone = atom({ plugin: 'session-todo', key: 'justDone' } as const, null)
 const paneAutoOpened = atom({ plugin: 'session-todo', key: 'paneAutoOpened' } as const, false)
+const shared = atom({ plugin: 'session-todo', key: 'shared' } as const, null)
 const THEME_FIELD = 'theme'
+
+/** How often a session following a shared board reads it back from the store for other sessions' writes. */
+const POLL_MS = 2000
+/** The longest label a session signs a shared board with. */
+const LABEL_MAX = 20
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'done', 'blocked']
 
@@ -180,7 +186,7 @@ function percentDone(items: readonly TodoItem[]): number {
 const ABOUT_MAX = 80
 
 type TodoToolInput = {
-  action: 'write' | 'add' | 'update' | 'remove' | 'read' | 'clear' | 'drop' | 'focus' | 'describe'
+  action: 'write' | 'add' | 'update' | 'remove' | 'read' | 'clear' | 'drop' | 'focus' | 'describe' | 'join' | 'leave'
   list?: string
   title?: string
   about?: string
@@ -190,7 +196,12 @@ type TodoToolInput = {
   status?: TodoStatus
   note?: string
   owner?: TodoOwner
+  board?: string
+  label?: string
 }
+
+/** The tool actions that change a board, as opposed to joining or leaving one. */
+type TodoBoardInput = TodoToolInput & { action: Exclude<TodoToolInput['action'], 'join' | 'leave'> }
 
 type TodoOwner = NonNullable<TodoItem['owner']>
 
@@ -205,12 +216,16 @@ const TOOL_DESCRIPTION = [
   '- clear: empty one list (list) or all. drop: remove a list. focus: make a list the active one. describe: set or clear a list\'s about (list, about).',
   'Use a second list, e.g. "followup", for things to do after the main work (open the PR, report a finding to Jira), so the main list stays focused.',
   'Keep item text short and imperative, one line each. Before reporting a task finished, leave its list true: every item done, items that fell away removed.',
+  '- join (board, optional label): follow a board shared by another session instead of this session\'s own; leave: back to this session\'s own board. The person usually does this with /todo share and /todo join; call join only when they ask for it.',
+  'On a shared board (the result says so) other sessions write too: add your items with add or write a list of your own, report progress with update, and never write a list you did not create, since write replaces its items.',
 ].join('\n')
 
 const TOOL_SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['write', 'add', 'update', 'remove', 'read', 'clear', 'drop', 'focus', 'describe'] },
+    action: { type: 'string', enum: ['write', 'add', 'update', 'remove', 'read', 'clear', 'drop', 'focus', 'describe', 'join', 'leave'] },
+    board: { type: 'string', description: 'The shared board to follow (join).' },
+    label: { type: 'string', description: `What this session signs its changes on the shared board with (join); at most ${LABEL_MAX} characters.` },
     list: {
       type: 'string',
       description: 'The list name (write, add, clear, drop, focus, describe). Defaults to the active list, or "main".',
@@ -258,6 +273,7 @@ const PROMPT_SECTION = {
     '- A list may carry an optional about: one short sentence on what it is for, set when the list is written and then left alone.',
     '- Before reporting a task finished, leave its list true: every item done, items that fell away removed. A stale list is worse than none.',
     '- After a context compaction, call read to recover the lists.',
+    '- A shared board (the person joined one with /todo share or /todo join; every tool result then says so) is written by other sessions too: add your items with add or in a list of your own, report progress with update, and never write a list you did not create, since write replaces its items.',
   ].join('\n'),
 } as const
 
@@ -306,9 +322,11 @@ function mapItem(todo: TodoBoard, id: string, change: (item: TodoItem) => TodoIt
   }
 }
 
-function render(todo: TodoBoard): string {
-  if (todo.lists.length === 0) return 'Todo: no lists'
-  const lines: string[] = []
+function render(todo: TodoBoard, following?: SharedBoard | null): string {
+  const lines: string[] = following
+    ? [`Shared board "${following.name}" (this session signs as "${following.label}"): other sessions write here too; add and update, never write over their lists.`]
+    : []
+  if (todo.lists.length === 0) return [...lines, 'Todo: no lists'].join('\n')
   let n = 0
   for (const list of drawn(todo)) {
     const done = list.items.filter(item => item.status === 'done').length
@@ -320,7 +338,8 @@ function render(todo: TodoBoard): string {
       n++
       const glyph = GLYPH[item.status].replace(' ', ' ')
       const owner = item.owner === 'user' ? ' [yours]' : ''
-      lines.push(`  ${glyph} ${n}. ${item.text} (${item.id})${owner}${item.note ? ` — ${item.note}` : ''}`)
+      const by = item.by ? ` @${item.by}` : ''
+      lines.push(`  ${glyph} ${n}. ${item.text} (${item.id})${owner}${by}${item.note ? ` — ${item.note}` : ''}`)
     }
   }
   return lines.join('\n')
@@ -328,6 +347,138 @@ function render(todo: TodoBoard): string {
 
 function storeKey(sessionId: string): string {
   return `board:${sessionId}`
+}
+
+/** Where a session records the shared board it follows, so a resume follows it again. */
+function followKey(sessionId: string): string {
+  return `follow:${sessionId}`
+}
+
+const SHARED_PREFIX = 'shared:'
+
+function sharedKey(name: string): string {
+  return `${SHARED_PREFIX}${name}`
+}
+
+function asBoard(value: unknown): TodoBoard | undefined {
+  const held = value as TodoBoard | undefined
+  return held && Array.isArray(held.lists) ? held : undefined
+}
+
+async function loadShared($: EngineInterface, name: string): Promise<TodoBoard | undefined> {
+  return asBoard(await $.store.get(sharedKey(name)))
+}
+
+/** Signs the items this session created or moved on a shared board, so every session sees who did what. */
+function signed(next: TodoBoard, base: TodoBoard, label: string): TodoBoard {
+  const was = new Map(allItems(base).map(item => [item.id, item]))
+  return {
+    ...next,
+    lists: next.lists.map(list => ({
+      ...list,
+      items: list.items.map(item => {
+        const before = was.get(item.id)
+        return before && before.status === item.status ? item : { ...item, by: label }
+      }),
+    })),
+  }
+}
+
+/** The label a session signs a shared board with: the one given, else the start of its id. */
+function labelOf(given: string | undefined, sessionId: string): string {
+  const label = (given ?? '').trim().replace(/\s+/g, ' ')
+  return (label || sessionId.slice(0, 6)).slice(0, LABEL_MAX)
+}
+
+/** `<name> [as <label>]`, as /todo share and /todo join take it. */
+function nameAndLabel(words: string[]): { name: string | undefined; label: string | undefined } {
+  const at = words.indexOf('as')
+  return { name: words[0], label: at > 0 ? words.slice(at + 1).join(' ') : undefined }
+}
+
+/** The poll of the shared board; a hot reload cancels it, and session.start arms it again. */
+let polling: Timer | undefined
+
+/** Reads the shared board back from the store and redraws when another session changed it. */
+async function pull($: EngineInterface, name: string): Promise<void> {
+  const fresh = await loadShared($, name)
+  if (!fresh) return
+  const held = await read($, board)
+  if (JSON.stringify(fresh) !== JSON.stringify(held)) await update($, board, () => fresh)
+}
+
+async function follow($: EngineInterface, following: SharedBoard, todo: TodoBoard): Promise<void> {
+  await $.store.set(followKey(await $.session.id()), following)
+  await update($, shared, () => following)
+  await update($, board, () => todo)
+  polling?.cancel()
+  polling = $.clock.every(POLL_MS, () => void pull($, following.name))
+}
+
+/** Back to this session's own board, left as it was when the shared one was joined. */
+async function unfollow($: EngineInterface): Promise<void> {
+  polling?.cancel()
+  polling = undefined
+  const sessionId = await $.session.id()
+  await $.store.delete(followKey(sessionId))
+  await update($, shared, () => null)
+  const own = asBoard(await $.store.get(storeKey(sessionId))) ?? EMPTY
+  await update($, board, () => own)
+}
+
+type Joined = { todo: TodoBoard; following: SharedBoard }
+
+async function joinBoard($: EngineInterface, name: string | undefined, label: string | undefined): Promise<Joined | string> {
+  if (!name || !isValidName(name)) return `board names are letters, digits, _ and -: ${name ?? '(none)'}`
+  const todo = await loadShared($, name)
+  if (!todo) return `no shared board named ${name}; /todo share ${name} creates it from a session's own board`
+  const following = { name, label: labelOf(label, await $.session.id()) }
+  await follow($, following, todo)
+  await openPane($)
+  return { todo, following }
+}
+
+/** Publishes this session's own board under a name and follows it. */
+async function shareBoard($: EngineInterface, name: string | undefined, label: string | undefined): Promise<Joined | string> {
+  if (!name || !isValidName(name)) return `board names are letters, digits, _ and -: ${name ?? '(none)'}`
+  const current = await read($, shared)
+  if (current) return `this session already follows the shared board ${current.name}; /todo leave first`
+  if (await loadShared($, name)) return `a shared board named ${name} exists; /todo join ${name} follows it`
+  const todo = await read($, board)
+  await $.store.set(sharedKey(name), todo)
+  const following = { name, label: labelOf(label, await $.session.id()) }
+  await follow($, following, todo)
+  await openPane($)
+  return { todo, following }
+}
+
+async function leaveBoard($: EngineInterface): Promise<string> {
+  const following = await read($, shared)
+  if (!following) return 'This session follows no shared board.'
+  await unfollow($)
+  return `Left the shared board ${following.name}; back to this session's own board.`
+}
+
+async function sharedBoards($: EngineInterface): Promise<string> {
+  const keys = (await $.store.keys()).filter(key => key.startsWith(SHARED_PREFIX))
+  if (keys.length === 0) return "No shared boards. /todo share <name> shares this session's board."
+  const following = await read($, shared)
+  const lines: string[] = []
+  for (const key of keys) {
+    const name = key.slice(SHARED_PREFIX.length)
+    const items = allItems(asBoard(await $.store.get(key)) ?? EMPTY)
+    const done = items.filter(item => item.status === 'done').length
+    lines.push(`${name}${following?.name === name ? ' (following)' : ''}: ${done}/${items.length} done`)
+  }
+  return lines.join('\n')
+}
+
+async function forgetBoard($: EngineInterface, name: string | undefined): Promise<string> {
+  if (!name) return 'Usage: /todo forget <name>'
+  if ((await read($, shared))?.name === name) return `This session follows ${name}; /todo leave first.`
+  if (!(await loadShared($, name))) return `No shared board named ${name}.`
+  await $.store.delete(sharedKey(name))
+  return `Forgot the shared board ${name}. A session still following it keeps what it holds and writes it back on its next change.`
 }
 
 async function isPaneShown($: EngineInterface): Promise<boolean> {
@@ -342,11 +493,26 @@ function redraw($: EngineInterface): void {
 /** How long the band shows an item that just finished before moving on to the next one. */
 const JUST_DONE_MS = 2000
 
-async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard): Promise<TodoBoard> {
-  const before = allItems(await read($, board))
-  const todo = await update($, board, change)
-  await $.store.set(storeKey(await $.session.id()), todo)
+/**
+ * Applies a change and persists the board: the session's own in its store slot, or the shared
+ * one, re-read from the store first so that what other sessions wrote since the last poll is
+ * kept under the change. Resolves to the change's refusal when it gives one.
+ */
+async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard | string): Promise<TodoBoard | string> {
+  const following = await read($, shared)
+  const held = await read($, board)
+  const base = following ? ((await loadShared($, following.name)) ?? held) : held
+  const changed = change(base)
+  if (typeof changed === 'string') return changed
+  if (changed === base) {
+    if (base !== held) await update($, board, () => base)
+    return base
+  }
+  const todo = following ? signed(changed, base, following.label) : changed
+  await update($, board, () => todo)
+  await $.store.set(following ? sharedKey(following.name) : storeKey(await $.session.id()), todo)
 
+  const before = allItems(held)
   const finished = allItems(todo).find(item => {
     const was = before.find(one => one.id === item.id)
     return was?.status === 'in_progress' && item.status === 'done'
@@ -397,7 +563,7 @@ async function autoOpenPane($: EngineInterface): Promise<void> {
   await openPane($)
 }
 
-function applyTool(todo: TodoBoard, input: TodoToolInput): TodoBoard | string {
+function applyTool(todo: TodoBoard, input: TodoBoardInput): TodoBoard | string {
   switch (input.action) {
     case 'read':
       return todo
@@ -547,7 +713,7 @@ function bandMode(value: unknown): BandMode {
   return 'closed'
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}]]`
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | share <name> [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}]]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
@@ -564,21 +730,28 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, theme <name>, compact [on|off], band [off|closed|always]',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | theme <name> | compact [on|off] | band [off|closed|always]]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, share <name>, join <name>, leave, boards, forget <name>, theme <name>, compact [on|off], band [off|closed|always]',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | share <name> [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <name> | compact [on|off] | band [off|closed|always]]',
     })
 
-    const saved = (await $.store.get(storeKey(await $.session.id()))) as TodoBoard | undefined
-    if (saved && Array.isArray(saved.lists)) await update($, board, () => saved)
+    const sessionId = await $.session.id()
+    const following = (await $.store.get(followKey(sessionId))) as SharedBoard | undefined
+    const saved = following?.name ? await loadShared($, following.name) : asBoard(await $.store.get(storeKey(sessionId)))
+    if (following?.name) await follow($, following, saved ?? EMPTY)
+    else if (saved) await update($, board, () => saved)
 
     // The pane opens on its own only when there is something to show: a restored board with
     // items. Otherwise the first write (the agent's or /todo add) opens it.
-    if (saved && Array.isArray(saved.lists) && allItems(saved).length > 0) void autoOpenPane($)
+    if (saved && allItems(saved).length > 0) void autoOpenPane($)
     return next(e)
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') await update($, board, () => EMPTY)
+    // /clear empties this session's board and never a shared one: the session leaves it instead.
+    if (e.reason === 'clear') {
+      if (await read($, shared)) await unfollow($)
+      await update($, board, () => EMPTY)
+    }
     return next(e)
   })
 
@@ -643,60 +816,72 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
     const input = e as unknown as TodoToolInput
-    const before = await read($, board)
+    if (input.action === 'join') {
+      const joined = await joinBoard($, input.board, input.label)
+      return typeof joined === 'string' ? { deny: `todo: ${joined}` } : { result: render(joined.todo, joined.following) }
+    }
+    if (input.action === 'leave') return { result: await leaveBoard($) }
+    const action = input.action
     const fitted = fitAbout(input.about)
-    const outcome = applyTool(before, { ...input, about: fitted.about })
+    const outcome = await commit($, todo => applyTool(todo, { ...input, action, about: fitted.about }))
     if (typeof outcome === 'string') return { deny: `todo: ${outcome}` }
-    const after = outcome === before ? before : await commit($, () => outcome)
-    if (input.action !== 'read') await autoOpenPane($)
-    return { result: fitted.note ? `${render(after)}\n(${fitted.note})` : render(after) }
+    if (action !== 'read') await autoOpenPane($)
+    const text = render(outcome, await read($, shared))
+    return { result: fitted.note ? `${text}\n(${fitted.note})` : text }
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
     const [verb = '', ...rest] = e.args.trim().split(/\s+/)
     const todo = await read($, board)
+    const following = await read($, shared)
+    const shown = (outcome: TodoBoard | string) => ({ text: typeof outcome === 'string' ? outcome : render(outcome, following) })
 
     if (verb === '') {
       await openPane($)
-      return { text: render(todo) }
+      return { text: render(todo, following) }
     }
     if (verb === 'add') {
       const list = rest[0]?.startsWith('@') ? rest.shift()?.slice(1) : undefined
       const text = rest.join(' ')
       if (!text) return { text: 'Usage: /todo add [@list] <text>' }
-      const outcome = applyTool(todo, { action: 'add', list, text, owner: 'user' })
-      if (typeof outcome === 'string') return { text: outcome }
-      const after = await commit($, () => outcome)
-      await openPane($)
-      return { text: render(after) }
+      const outcome = await commit($, todo => applyTool(todo, { action: 'add', list, text, owner: 'user' }))
+      if (typeof outcome !== 'string') await openPane($)
+      return shown(outcome)
     }
     if (verb === 'clear' || verb === 'drop' || verb === 'focus') {
-      const outcome = applyTool(todo, { action: verb, list: rest[0] })
-      if (typeof outcome === 'string') return { text: outcome }
-      return { text: render(await commit($, () => outcome)) }
+      return shown(await commit($, todo => applyTool(todo, { action: verb, list: rest[0] })))
     }
     if (verb === 'about') {
       const [list, ...words] = rest
       if (!list) return { text: 'Usage: /todo about <list> [text]  (no text clears it)' }
       const fitted = fitAbout(words.join(' '))
-      const outcome = applyTool(todo, { action: 'describe', list, about: fitted.about })
-      if (typeof outcome === 'string') return { text: outcome }
-      const text = render(await commit($, () => outcome))
-      return { text: fitted.note ? `${text}\n(${fitted.note})` : text }
+      const outcome = await commit($, todo => applyTool(todo, { action: 'describe', list, about: fitted.about }))
+      const { text } = shown(outcome)
+      return { text: fitted.note && typeof outcome !== 'string' ? `${text}\n(${fitted.note})` : text }
     }
     if (verb === 'start' || verb === 'done' || verb === 'remove') {
       const arg = rest.join(' ')
       const target = byNumber(todo, arg)
       if (!target) return { text: `No item ${arg || '(none)'}. Items are numbered as the pane shows them.` }
-      const outcome = applyTool(
-        todo,
-        verb === 'remove'
-          ? { action: 'remove', id: target.id }
-          : { action: 'update', id: target.id, status: verb === 'start' ? 'in_progress' : 'done' },
+      return shown(
+        await commit($, todo =>
+          applyTool(
+            todo,
+            verb === 'remove'
+              ? { action: 'remove', id: target.id }
+              : { action: 'update', id: target.id, status: verb === 'start' ? 'in_progress' : 'done' },
+          ),
+        ),
       )
-      if (typeof outcome === 'string') return { text: outcome }
-      return { text: render(await commit($, () => outcome)) }
     }
+    if (verb === 'share' || verb === 'join') {
+      const { name, label } = nameAndLabel(rest)
+      const outcome = verb === 'share' ? await shareBoard($, name, label) : await joinBoard($, name, label)
+      return { text: typeof outcome === 'string' ? outcome : render(outcome.todo, outcome.following) }
+    }
+    if (verb === 'leave') return { text: await leaveBoard($) }
+    if (verb === 'boards') return { text: await sharedBoards($) }
+    if (verb === 'forget') return { text: await forgetBoard($, rest[0]) }
     if (verb === 'compact') {
       const wanted = rest[0] === 'on' ? true : rest[0] === 'off' ? false : !isCompact
       const failed = await setOption($, 'compact', wanted)
@@ -731,6 +916,7 @@ export const register: Register = (on, options) => {
     // The bar sits in the title row, so it stays short: a sixth of the pane, between 8 and 18 cells.
     const barWidth = Math.max(4, Math.round(Math.min(18, Math.max(8, Math.round(e.props.bodyColumns / 6))) * (theme.barScale ?? 1)))
     const isSettingsOpen = await read($, settingsOpen)
+    const following = await read($, shared)
     const friday = isFriday(await $.clock.now())
 
     const settings =
@@ -795,6 +981,13 @@ export const register: Register = (on, options) => {
           />
         </Box>
         {settings}
+        {following && (
+          <Box marginBottom={1}>
+            <Text dimColor wrap="wrap">
+              {`⇄ shared board ${following.name} · this session signs as ${following.label}`}
+            </Text>
+          </Box>
+        )}
         {lists.length === 0 && (
           <Text dimColor wrap="wrap">
             Nothing planned yet. The agent fills this in as work is planned; /todo add adds your own.
@@ -862,6 +1055,7 @@ export const register: Register = (on, options) => {
                       <Text color={item.owner === 'user' ? USER_MARK_COLOR : AGENT_MARK_COLOR} dimColor={item.status === 'done'}>
                         {item.owner === 'user' ? USER_MARK : AGENT_MARK}
                       </Text>
+                      {item.by && <Text dimColor>{`@${item.by}`}</Text>}
                     </Box>
                     {item.note && (
                       <Box paddingLeft={4}>

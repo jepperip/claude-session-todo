@@ -9,6 +9,14 @@ export type TodoItem = {
   note?: string
   /** Who does it: the agent (the default for items it writes) or the person (items they add, or steps only they can take). */
   owner?: 'agent' | 'user'
+  /** On a shared board: the label of the session that created the item or last changed its status. */
+  by?: string
+}
+
+/** A board several sessions read and write through the plugin store, and what this session signs its changes with. */
+export type SharedBoard = {
+  name: string
+  label: string
 }
 
 export type TodoList = {
@@ -39,6 +47,8 @@ declare module 'claude-code' {
       justDone: { id: string; text: string } | null
       /** Whether the pane has already opened on its own this session; it does so once at most. */
       paneAutoOpened: boolean
+      /** The shared board this session follows instead of its own, or null. */
+      shared: SharedBoard | null
     }
   }
 }
