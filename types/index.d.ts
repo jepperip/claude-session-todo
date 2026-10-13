@@ -37,6 +37,8 @@ export type TodoBoard = {
   active?: string
   /** Feeds the next item id, so ids stay unique after removals. */
   nextId: number
+  /** When the board was last written to the store, in epoch milliseconds; a board untouched for long is pruned. */
+  updatedAt?: number
 }
 
 declare module 'claude-code' {

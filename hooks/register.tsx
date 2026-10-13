@@ -20,6 +20,8 @@ const THEME_FIELD = 'theme'
 const POLL_MS = 2000
 /** The longest label a session signs a shared board with. */
 const LABEL_MAX = 20
+/** How long a stored board may go without a write before a session start prunes it. */
+const KEEP_MS = 30 * 24 * 60 * 60 * 1000
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'done', 'blocked']
 
@@ -373,6 +375,40 @@ async function loadShared($: EngineInterface, name: string): Promise<TodoBoard |
   return asBoard(await $.store.get(sharedKey(name)))
 }
 
+function stamped(todo: TodoBoard, now: number): TodoBoard {
+  return { ...todo, updatedAt: now }
+}
+
+function ago(ms: number): string {
+  const days = Math.floor(ms / (24 * 60 * 60 * 1000))
+  return days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`
+}
+
+const MIRROR_PREFIX = 'board:'
+
+/**
+ * Drops the boards nobody has written for KEEP_MS: other sessions' mirrors (with the shared
+ * board they followed) and shared boards. This session's own mirror and the board it follows
+ * are stamped instead; a board from before the stamps gets one now, so it ages from here.
+ */
+async function prune($: EngineInterface, sessionId: string, followed: string | undefined): Promise<void> {
+  const now = await $.clock.now()
+  const kept = new Set([storeKey(sessionId), ...(followed ? [sharedKey(followed)] : [])])
+  for (const key of await $.store.keys()) {
+    const isMirror = key.startsWith(MIRROR_PREFIX)
+    if (!isMirror && !key.startsWith(SHARED_PREFIX)) continue
+    const held = asBoard(await $.store.get(key))
+    if (!held) continue
+    if (kept.has(key) || held.updatedAt === undefined) {
+      await $.store.set(key, stamped(held, now))
+      continue
+    }
+    if (now - held.updatedAt <= KEEP_MS) continue
+    await $.store.delete(key)
+    if (isMirror) await $.store.delete(followKey(key.slice(MIRROR_PREFIX.length)))
+  }
+}
+
 /** Signs the items this session created or moved on a shared board, so every session sees who did what. */
 function signed(next: TodoBoard, base: TodoBoard, label: string): TodoBoard {
   const was = new Map(allItems(base).map(item => [item.id, item]))
@@ -451,7 +487,7 @@ async function shareBoard($: EngineInterface, given: string | undefined, label: 
   if (!name) return 'the board has no name yet: /todo share <name>, or /todo name <name> first'
   if (!isValidName(name)) return `board names are letters, digits, _ and -: ${name}`
   if (await loadShared($, name)) return `a shared board named ${name} exists; /todo join ${name} follows it`
-  const todo: TodoBoard = { ...own, name }
+  const todo = stamped({ ...own, name }, await $.clock.now())
   await $.store.set(sharedKey(name), todo)
   const following = { name, label: labelOf(label, await $.session.id()) }
   await follow($, following, todo)
@@ -470,14 +506,17 @@ async function sharedBoards($: EngineInterface): Promise<string> {
   const keys = (await $.store.keys()).filter(key => key.startsWith(SHARED_PREFIX))
   if (keys.length === 0) return "No shared boards. /todo share <name> shares this session's board."
   const following = await read($, shared)
+  const now = await $.clock.now()
   const lines: string[] = []
   for (const key of keys) {
     const name = key.slice(SHARED_PREFIX.length)
-    const items = allItems(asBoard(await $.store.get(key)) ?? EMPTY)
+    const held = asBoard(await $.store.get(key)) ?? EMPTY
+    const items = allItems(held)
     const done = items.filter(item => item.status === 'done').length
-    lines.push(`${name}${following?.name === name ? ' (following)' : ''}: ${done}/${items.length} done`)
+    const changed = held.updatedAt === undefined ? '' : `, last change ${ago(now - held.updatedAt)}`
+    lines.push(`${name}${following?.name === name ? ' (following)' : ''}: ${done}/${items.length} done${changed}`)
   }
-  return lines.join('\n')
+  return [...lines, `Boards with no change for ${KEEP_MS / (24 * 60 * 60 * 1000)} days are dropped when a session starts; /todo forget <name> drops one now.`].join('\n')
 }
 
 async function forgetBoard($: EngineInterface, name: string | undefined): Promise<string> {
@@ -515,7 +554,7 @@ async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard
     if (base !== held) await update($, board, () => base)
     return base
   }
-  const todo = following ? signed(changed, base, following.label) : changed
+  const todo = stamped(following ? signed(changed, base, following.label) : changed, await $.clock.now())
   await update($, board, () => todo)
   await $.store.set(following ? sharedKey(following.name) : storeKey(await $.session.id()), todo)
 
@@ -750,6 +789,7 @@ export const register: Register = (on, options) => {
     const saved = following?.name ? await loadShared($, following.name) : asBoard(await $.store.get(storeKey(sessionId)))
     if (following?.name) await follow($, following, saved ?? EMPTY)
     else if (saved) await update($, board, () => saved)
+    await prune($, sessionId, following?.name)
 
     // The pane opens on its own only when there is something to show: a restored board with
     // items. Otherwise the first write (the agent's or /todo add) opens it.
@@ -1039,6 +1079,11 @@ export const register: Register = (on, options) => {
           </Box>
         </Box>
         {settings}
+        <Box marginBottom={1}>
+          <Text dimColor wrap="truncate-end">
+            {'─'.repeat(Math.max(4, e.props.bodyColumns - 2))}
+          </Text>
+        </Box>
         {lists.length === 0 && (
           <Text dimColor wrap="wrap">
             Nothing planned yet. The agent fills this in as work is planned; /todo add adds your own.

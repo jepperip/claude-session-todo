@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const TOOL = 'mcp__session-todo__todo'
 
@@ -6,8 +6,9 @@ type Body = Parameters<typeof test>[1]
 type Engine = Parameters<Body>[0]
 type On = Parameters<Body>[1]
 
-/** What the kit leaves unanswered beneath the plugin: the store, the session id, the status line and the pane. */
-function engine(on: On): Map<string, unknown> {
+/** What the kit leaves unanswered beneath the plugin: the clock, the store, the session id, the status line and the pane. */
+function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeof mock.clock> } {
+  const clock = mock.clock(on)
   const stored = new Map<string, unknown>()
   on('store.get', (_$, e) => ({ value: stored.get(e.key) }))
   on('store.set', (_$, e) => {
@@ -19,13 +20,16 @@ function engine(on: On): Map<string, unknown> {
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...stored.keys()] }))
-  // The poll of a shared board never fires here: a test writes the store itself in another session's stead.
-  on('clock.every', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'test-session' }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('tool.register', (_$, e) => ({ value: { tool: e.name } }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
-  return stored
+  // The poll of a shared board never fires here: the mock clock stands still, and a test writes
+  // the store itself in another session's stead.
+  return { stored, clock }
 }
 
 /** The lists as the tool renders them for the model: the pane's text, one line per list and item. */
@@ -140,7 +144,7 @@ test('/todo add targets a list with @name and done counts items in pane order', 
 })
 
 test('share publishes the own board, changes go to the shared one signed, and leave restores the own board', async ($, on) => {
-  const stored = engine(on)
+  const { stored } = engine(on)
   await $.tool.call({ tool: TOOL, action: 'write', list: 'plan', items: [{ id: 'one', text: 'One' }] })
   const { text: sharedText } = await $.command.run({ command: 'todo', args: 'share plan as planner' })
   expect(sharedText).toContain('Shared board "plan" (this session signs as "planner")')
@@ -162,7 +166,7 @@ test('share publishes the own board, changes go to the shared one signed, and le
 })
 
 test('a change on a shared board is applied over what other sessions wrote since the last poll', async ($, on) => {
-  const stored = engine(on)
+  const { stored } = engine(on)
   await $.tool.call({ tool: TOOL, action: 'write', list: 'plan', items: [{ id: 'one', text: 'One' }] })
   await $.command.run({ command: 'todo', args: 'share plan as planner' })
 
@@ -183,7 +187,7 @@ test('a change on a shared board is applied over what other sessions wrote since
 })
 
 test('a board named by the agent shares under that name without an argument', async ($, on) => {
-  const stored = engine(on)
+  const { stored } = engine(on)
   const refused = await $.command.run({ command: 'todo', args: 'share' })
   expect(refused.text).toContain('the board has no name yet')
 
@@ -197,8 +201,32 @@ test('a board named by the agent shares under that name without an argument', as
   expect(renamed.text).toContain('follows the shared board DAN-1234, which keeps its name')
 })
 
+test('a session start drops boards untouched for 30 days and keeps the rest', async ($, on) => {
+  const { stored, clock } = engine(on)
+  const day = 24 * 60 * 60 * 1000
+  await clock.set(100 * day)
+  const now = clock.now()
+  const board = (updatedAt?: number) => ({ lists: [{ name: 'main', title: 'main', items: [] }], nextId: 1, ...(updatedAt === undefined ? {} : { updatedAt }) })
+  stored.set('board:old-session', board(now - 31 * day))
+  stored.set('follow:old-session', { name: 'stale', label: 'x' })
+  stored.set('shared:stale', board(now - 31 * day))
+  stored.set('shared:fresh', board(now - 2 * day))
+  stored.set('shared:unstamped', board())
+
+  await $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true })
+  expect(stored.has('board:old-session')).toBe(false)
+  expect(stored.has('follow:old-session')).toBe(false)
+  expect(stored.has('shared:stale')).toBe(false)
+  expect(stored.has('shared:fresh')).toBe(true)
+  expect((stored.get('shared:unstamped') as { updatedAt?: number }).updatedAt).toBe(now)
+
+  const { text } = await $.command.run({ command: 'todo', args: 'boards' })
+  expect(text).toContain('fresh: 0/0 done, last change 2 days ago')
+  expect(text).toContain('unstamped: 0/0 done, last change today')
+})
+
 test('join follows an existing shared board and refuses a missing one', async ($, on) => {
-  const stored = engine(on)
+  const { stored } = engine(on)
   stored.set('shared:plan', { lists: [{ name: 'plan', title: 'The plan', items: [{ id: 'p1', text: 'Step', status: 'pending' }] }], nextId: 2 })
   const refused = await $.tool.call({ tool: TOOL, action: 'join', board: 'nope' })
   expect(refused.deny).toContain('no shared board named nope')
