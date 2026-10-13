@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { Elements, EngineInterface, Register, Timer } from 'claude-code'
 
 import type { SharedBoard, TodoBoard, TodoItem, TodoList, TodoStatus } from '../types'
 
@@ -14,6 +14,7 @@ const settingsOpen = atom({ plugin: 'session-todo', key: 'settingsOpen' } as con
 const justDone = atom({ plugin: 'session-todo', key: 'justDone' } as const, null)
 const paneAutoOpened = atom({ plugin: 'session-todo', key: 'paneAutoOpened' } as const, false)
 const shared = atom({ plugin: 'session-todo', key: 'shared' } as const, null)
+const bandOpen = atom({ plugin: 'session-todo', key: 'bandOpen' } as const, false)
 const THEME_FIELD = 'theme'
 
 /** How often a session following a shared board reads it back from the store for other sessions' writes. */
@@ -799,6 +800,120 @@ function bandMode(value: unknown): BandMode {
   return 'closed'
 }
 
+type BoardElements = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'>
+type BoardDrawing = { theme: Theme; isCompact: boolean; bodyColumns: number }
+
+/**
+ * The lists with their items, and the block under them (the items needing the person, the ones
+ * in progress), as both the pane and the unfolded band draw them. A glyph click cycles the item.
+ */
+function drawBoard($: EngineInterface, ui: BoardElements, todo: TodoBoard, { theme, isCompact, bodyColumns }: BoardDrawing) {
+  const { Box, Text, Button } = ui
+  const lists = drawn(todo)
+  const current = lists.flatMap(list => list.items).filter(item => item.status === 'in_progress')
+  const waiting = waitingOnYou(todo)
+  // The bar sits in the title row, so it stays short: a sixth of the width, between 8 and 18 cells.
+  const barWidth = Math.max(4, Math.round(Math.min(18, Math.max(8, Math.round(bodyColumns / 6))) * (theme.barScale ?? 1)))
+  const toggle = (item: TodoItem) => () =>
+    void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })), true)
+
+  let n = 0
+  return [
+    ...(lists.length === 0
+      ? [
+          <Text key="empty" dimColor wrap="wrap">
+            Nothing planned yet. The agent fills this in as work is planned; /todo add adds your own.
+          </Text>,
+        ]
+      : []),
+    ...lists.map((list, index) => {
+      const done = list.items.filter(item => item.status === 'done').length
+      return (
+        <Box key={`list:${list.name}`} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
+          <Box flexDirection="row" justifyContent="space-between" gap={2}>
+            <Text bold color={theme.title} wrap="wrap">
+              {list.title}
+            </Text>
+            <Box flexDirection="row" gap={1} flexShrink={0}>
+              <Box flexDirection="row">
+                {barSegments(list.items, barWidth)
+                  .filter(segment => segment.cells > 0)
+                  .map(segment => (
+                    <Text
+                      key={`bar:${list.name}:${segment.status}`}
+                      color={theme.status[segment.status]}
+                      dimColor={segment.status === 'pending' && !theme.status.pending}
+                    >
+                      {(segment.status === 'pending' ? theme.barRest : theme.barFill).repeat(segment.cells)}
+                    </Text>
+                  ))}
+              </Box>
+              <Text bold={done === list.items.length && done > 0} dimColor={done !== list.items.length && !theme.accent} color={theme.accent}>
+                {list.items.length === 0 ? 'empty' : `${done}/${list.items.length}`}
+              </Text>
+            </Box>
+          </Box>
+          <Box marginBottom={list.items.length === 0 ? 0 : 1}>
+            {list.about && (
+              <Text dimColor italic wrap="wrap">
+                {list.about}
+              </Text>
+            )}
+          </Box>
+          {list.items.map((item, index) => {
+            n++
+            return (
+              <Box key={`row:${item.id}`} flexDirection="column" marginTop={index === 0 || isCompact ? 0 : 1}>
+                <Box flexDirection="row" gap={1}>
+                  <Button plain key={`toggle:${item.id}`} label={GLYPH[item.status]} dimColor={item.status === 'done'} onPress={toggle(item)} />
+                  <Text
+                    wrap="wrap"
+                    bold={item.status === 'in_progress'}
+                    dimColor={item.status === 'done'}
+                    strikethrough={item.status === 'done'}
+                    color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
+                  >
+                    {`${n}. ${item.text}`}
+                  </Text>
+                  <Text color={item.owner === 'user' ? USER_MARK_COLOR : AGENT_MARK_COLOR} dimColor={item.status === 'done'}>
+                    {item.owner === 'user' ? USER_MARK : AGENT_MARK}
+                  </Text>
+                  {item.by && <Text dimColor>{`@${item.by}`}</Text>}
+                </Box>
+                {item.note && (
+                  <Box paddingLeft={4}>
+                    <Text dimColor wrap="wrap">
+                      {item.note}
+                    </Text>
+                  </Box>
+                )}
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    }),
+    ...(waiting.length > 0 || current.length > 0
+      ? [
+          <Box key="now" flexDirection="column" marginTop={1}>
+            {waiting.map(item => (
+              <Text key={`you:${item.id}`} bold color={USER_MARK_COLOR} wrap="wrap">
+                {`${USER_MARK} needs you: ${item.text}${item.note ? ` — ${item.note}` : ''}`}
+              </Text>
+            ))}
+            {current
+              .filter(item => !waiting.includes(item))
+              .map(item => (
+                <Text key={`now:${item.id}`} dimColor={!theme.accent} color={theme.accent} wrap="wrap">
+                  {`now: ${item.text}`}
+                </Text>
+              ))}
+          </Box>,
+        ]
+      : []),
+  ]
+}
+
 const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}] | notify [on|off]]`
 
 export const register: Register = (on, options) => {
@@ -875,31 +990,52 @@ export const register: Register = (on, options) => {
     // An item waiting on the person takes the band over everything else, in their colour.
     const waiting = waitingOnYou(todo)
     const you = waiting[0]
-    const glyph = you ? USER_MARK : finished ? GLYPH.done : current.length > 0 ? GLYPH.in_progress : GLYPH.pending
-    const glyphColor = you ? USER_MARK_COLOR : finished ? theme.status.done : current.length > 0 ? theme.status.in_progress : undefined
+    const glyph = you ? GLYPH[you.status] : finished ? GLYPH.done : current.length > 0 ? GLYPH.in_progress : GLYPH.pending
+    const glyphColor = you
+      ? you.status === 'pending'
+        ? undefined
+        : theme.status[you.status]
+      : finished
+        ? theme.status.done
+        : current.length > 0
+          ? theme.status.in_progress
+          : undefined
     const label = you
       ? `${you.text}${waiting.length > 1 ? ` (+${waiting.length - 1})` : ''}`
       : finished
         ? `DONE: ${finished.text}`
         : now
+    // The ▸ unfolds the whole board under the row, as the pane draws it; the engine scrolls a
+    // tall one in its window. The fold is remembered for the session.
+    const isOpen = await read($, bandOpen)
+    const fold = () => void update($, bandOpen, open => !open)
     return (
-      <Box flexDirection="row" justifyContent="space-between" gap={2}>
-        <Box flexDirection="row" gap={1} minWidth={0}>
-          <Text bold color={glyphColor} dimColor={isIdle && !finished && !you}>
-            {you ? `${USER_MARK} NEEDS YOU:` : glyph}
-          </Text>
-          {isIdle && !finished && !you ? (
-            <Text wrap="truncate-end" dimColor>
-              {label}
+      <Box flexDirection="column">
+        <Box flexDirection="row" justifyContent="space-between" gap={2}>
+          <Box flexDirection="row" gap={1} minWidth={0}>
+            <Text bold color={glyphColor} dimColor={isIdle && !finished && !you}>
+              {glyph}
             </Text>
-          ) : (
-            <Button plain key="open-current" label={label} onPress={() => void openPane($)} />
-          )}
+            {you && <Text bold color={USER_MARK_COLOR}>TODO YOU:</Text>}
+            {isIdle && !finished && !you ? (
+              <Text wrap="truncate-end" dimColor>
+                {label}
+              </Text>
+            ) : (
+              <Button plain key="open-current" label={label} onPress={fold} />
+            )}
+          </Box>
+          <Box flexDirection="row" gap={1} flexShrink={0}>
+            <Text color={theme.accent} dimColor={!theme.accent}>{`${done}/${items.length}`}</Text>
+            <Button key="open-pane" label="Open Pane" onPress={() => void openPane($)} />
+            <Button plain key="fold" label={isOpen ? '▾' : '▸'} onPress={fold} />
+          </Box>
         </Box>
-        <Box flexDirection="row" gap={1} flexShrink={0}>
-          <Text color={theme.accent} dimColor={!theme.accent}>{`${done}/${items.length}`}</Text>
-          <Button key="open-pane" label="All items" onPress={() => void openPane($)} />
-        </Box>
+        {isOpen && (
+          <Box flexDirection="column" paddingLeft={2} marginTop={1}>
+            {drawBoard($, { Box, Text, Button }, todo, { theme, isCompact, bodyColumns: Math.max(20, e.props.bodyColumns - 2) })}
+          </Box>
+        )}
       </Box>
     )
   })
@@ -1017,14 +1153,6 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const todo = await read($, board)
     const lists = drawn(todo)
-    const current = lists.flatMap(list => list.items).filter(item => item.status === 'in_progress')
-    const waiting = waitingOnYou(todo)
-
-    const toggle = (item: TodoItem) => () =>
-      void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })), true)
-
-    // The bar sits in the title row, so it stays short: a sixth of the pane, between 8 and 18 cells.
-    const barWidth = Math.max(4, Math.round(Math.min(18, Math.max(8, Math.round(e.props.bodyColumns / 6))) * (theme.barScale ?? 1)))
     const isSettingsOpen = await read($, settingsOpen)
     const following = await read($, shared)
     const friday = isFriday(await $.clock.now())
@@ -1124,7 +1252,6 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    let n = 0
     return (
       <Box flexDirection="column" paddingX={1} minHeight={e.props.scroll.bodyRows}>
         <Box flexDirection="row" justifyContent="space-between" gap={2}>
@@ -1148,104 +1275,7 @@ export const register: Register = (on, options) => {
             {'─'.repeat(Math.max(4, e.props.bodyColumns - 2))}
           </Text>
         </Box>
-        {lists.length === 0 && (
-          <Text dimColor wrap="wrap">
-            Nothing planned yet. The agent fills this in as work is planned; /todo add adds your own.
-          </Text>
-        )}
-        {lists.map((list, index) => {
-          const done = list.items.filter(item => item.status === 'done').length
-          return (
-            <Box key={`list:${list.name}`} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-              <Box flexDirection="row" justifyContent="space-between" gap={2}>
-                <Text bold color={theme.title} wrap="wrap">
-                  {list.title}
-                </Text>
-                <Box flexDirection="row" gap={1} flexShrink={0}>
-                  <Box flexDirection="row">
-                    {barSegments(list.items, barWidth)
-                      .filter(segment => segment.cells > 0)
-                      .map(segment => (
-                        <Text
-                          key={`bar:${list.name}:${segment.status}`}
-                          color={theme.status[segment.status]}
-                          dimColor={segment.status === 'pending' && !theme.status.pending}
-                        >
-                          {(segment.status === 'pending' ? theme.barRest : theme.barFill).repeat(segment.cells)}
-                        </Text>
-                      ))}
-                  </Box>
-                  <Text
-                    bold={done === list.items.length && done > 0}
-                    dimColor={done !== list.items.length && !theme.accent}
-                    color={theme.accent}
-                  >
-                    {list.items.length === 0 ? 'empty' : `${done}/${list.items.length}`}
-                  </Text>
-                </Box>
-              </Box>
-              <Box marginBottom={list.items.length === 0 ? 0 : 1}>
-                {list.about && (
-                  <Text dimColor italic wrap="wrap">
-                    {list.about}
-                  </Text>
-                )}
-              </Box>
-              {list.items.map((item, index) => {
-                n++
-                return (
-                  <Box key={`row:${item.id}`} flexDirection="column" marginTop={index === 0 || isCompact ? 0 : 1}>
-                    <Box flexDirection="row" gap={1}>
-                      <Button
-                        plain
-                        key={`toggle:${item.id}`}
-                        label={GLYPH[item.status]}
-                        dimColor={item.status === 'done'}
-                        onPress={toggle(item)}
-                      />
-                      <Text
-                        wrap="wrap"
-                        bold={item.status === 'in_progress'}
-                        dimColor={item.status === 'done'}
-                        strikethrough={item.status === 'done'}
-                        color={item.status === 'done' || item.status === 'pending' ? undefined : theme.status[item.status]}
-                      >
-                        {`${n}. ${item.text}`}
-                      </Text>
-                      <Text color={item.owner === 'user' ? USER_MARK_COLOR : AGENT_MARK_COLOR} dimColor={item.status === 'done'}>
-                        {item.owner === 'user' ? USER_MARK : AGENT_MARK}
-                      </Text>
-                      {item.by && <Text dimColor>{`@${item.by}`}</Text>}
-                    </Box>
-                    {item.note && (
-                      <Box paddingLeft={4}>
-                        <Text dimColor wrap="wrap">
-                          {item.note}
-                        </Text>
-                      </Box>
-                    )}
-                  </Box>
-                )
-              })}
-            </Box>
-          )
-        })}
-        {(waiting.length > 0 || current.length > 0) && (
-          <Box flexDirection="column" marginTop={1}>
-            {waiting.map(item => (
-              <Text key={`you:${item.id}`} bold color={USER_MARK_COLOR} wrap="wrap">
-                {`${USER_MARK} needs you: ${item.text}${item.note ? ` — ${item.note}` : ''}`}
-              </Text>
-            ))}
-            {current
-              .filter(item => !waiting.includes(item))
-              .map(item => (
-                <Text key={`now:${item.id}`} dimColor={!theme.accent} color={theme.accent} wrap="wrap">
-                  {`now: ${item.text}`}
-                </Text>
-              ))}
-          </Box>
-        )}
+        {drawBoard($, { Box, Text, Button }, todo, { theme, isCompact, bodyColumns: e.props.bodyColumns })}
         <Box flexGrow={1} />
         {friday && (
           <Box flexDirection="column" marginTop={1}>

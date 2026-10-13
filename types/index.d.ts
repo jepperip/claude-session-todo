@@ -52,6 +52,9 @@ declare module 'claude-code' {
       /** Whether the pane has already opened on its own this session; it does so once at most. */
       paneAutoOpened: boolean
       /** The shared board this session follows instead of its own, or null. */
-      shared: SharedBoard | null    }
+      shared: SharedBoard | null
+      /** Whether the band above the prompt is unfolded to show the whole board under its row. */
+      bandOpen: boolean
+    }
   }
 }
