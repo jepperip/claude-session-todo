@@ -651,9 +651,11 @@ async function openPane($: EngineInterface): Promise<void> {
 
 /**
  * Opens the pane on the agent's behalf, once per session at most: the first write brings it up,
- * and after that a pane the person closed stays closed, with the band standing in for it.
+ * and after that a pane the person closed stays closed, with the band standing in for it. In the
+ * band-only layout the pane opens only when the person asks for it.
  */
 async function autoOpenPane($: EngineInterface): Promise<void> {
+  if (layout === 'band') return
   if (await read($, paneAutoOpened)) return
   await openPane($)
 }
@@ -800,17 +802,26 @@ function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
   return items.find(item => item.id === arg)
 }
 
-/** When the band above the prompt shows: never, only while the pane is closed, or always. */
-type BandMode = 'off' | 'closed' | 'always'
-const BAND_MODES: readonly BandMode[] = ['off', 'closed', 'always']
-const BAND_LABELS: Record<BandMode, string> = { off: 'off', closed: 'when the pane is closed', always: 'always' }
+/**
+ * What shows where: `auto` (the band while the pane is closed; the pane opens on its own at the
+ * first items), `both` (the band always, the pane as in auto), `band` (the band always, the pane
+ * only when asked for), `pane` (no band, the pane as in auto).
+ */
+type Layout = 'auto' | 'both' | 'band' | 'pane'
+const LAYOUTS: readonly Layout[] = ['auto', 'both', 'band', 'pane']
+const LAYOUT_LABELS: Record<Layout, string> = { auto: 'auto', both: 'band and pane', band: 'band only', pane: 'pane only' }
+/** The band setting the layout replaced: its modes, and the switch it was before that, map onto layouts. */
+const OLD_BAND: Record<string, Layout> = { off: 'pane', closed: 'auto', always: 'both' }
 
-/** Reads the band option; a boolean left over from when it was an on/off switch maps onto the modes. */
-function bandMode(value: unknown): BandMode {
-  if (value === false) return 'off'
-  if (typeof value === 'string' && (BAND_MODES as readonly string[]).includes(value)) return value as BandMode
-  return 'closed'
+function layoutOf(value: unknown, oldBand?: unknown): Layout {
+  if (typeof value === 'string' && (LAYOUTS as readonly string[]).includes(value)) return value as Layout
+  if (oldBand === false) return 'pane'
+  if (typeof oldBand === 'string' && oldBand in OLD_BAND) return OLD_BAND[oldBand] as Layout
+  return 'auto'
 }
+
+/** The layout in force; set from the plugin's options on load. */
+let layout: Layout = 'auto'
 
 type BoardElements = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'>
 type BoardDrawing = { theme: Theme; isCompact: boolean; bodyColumns: number }
@@ -930,12 +941,12 @@ function drawBoard($: EngineInterface, ui: BoardElements, todo: TodoBoard, { the
   ]
 }
 
-const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | compact [on|off] | band [${BAND_MODES.join('|')}] | notify [on|off]]`
+const USAGE = `Usage: /todo [add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <${THEME_NAMES.join('|')}> | layout [${LAYOUTS.join('|')}] | compact [on|off] | notify [on|off]]`
 
 export const register: Register = (on, options) => {
   const themeKey = themeName(options.theme)
   const isCompact = options.compact === true
-  const band = bandMode(options.band)
+  layout = layoutOf(options.layout, (options as Record<string, unknown>).band)
   notifies = options.notify !== false
   const theme = THEMES[themeKey] as Theme
 
@@ -948,8 +959,8 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, name <name>, share [name], join <name>, leave, boards, forget <name>, theme <name>, compact [on|off], band [off|closed|always], notify [on|off]',
-      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <name> | compact [on|off] | band [off|closed|always] | notify [on|off]]',
+      description: 'The session todo pane: /todo, add [@list] <text>, start <n>, done <n>, remove <n>, about <list> [text], clear [list], drop <list>, focus <list>, name <name>, share [name], join <name>, leave, boards, forget <name>, theme <name>, layout [auto|both|band|pane], compact [on|off], notify [on|off]',
+      argumentHint: '[add [@list] <text> | start <n> | done <n> | remove <n> | about <list> [text] | clear [list] | drop <list> | focus <list> | name <name> | share [name] [as <label>] | join <name> [as <label>] | leave | boards | forget <name> | theme <name> | layout [auto|both|band|pane] | compact [on|off] | notify [on|off]]',
     })
 
     const sessionId = await $.session.id()
@@ -981,10 +992,10 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (band === 'off' || e.props.hasSurvey) return next(e)
+    if (layout === 'pane' || e.props.hasSurvey) return next(e)
     const todo = await read($, board)
     const items = allItems(todo)
-    if (items.length === 0 || (band === 'closed' && (await isPaneShown($)))) return next(e)
+    if (items.length === 0 || (layout === 'auto' && (await isPaneShown($)))) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
     const done = items.filter(item => item.status === 'done').length
@@ -1150,13 +1161,20 @@ export const register: Register = (on, options) => {
       const failed = await setOption($, 'notify', wanted)
       return { text: failed ? `Could not set notify: ${failed}` : `Toast when an item needs you: ${wanted ? 'on' : 'off'}. The band and the pane show it either way.` }
     }
-    if (verb === 'band') {
-      // Without an argument the modes cycle; `on` still means what it did when the band was a switch.
-      const given = rest[0] === 'on' ? 'closed' : rest[0]
-      if (given !== undefined && !(BAND_MODES as readonly string[]).includes(given)) return { text: `Band modes: ${BAND_MODES.join(', ')}` }
-      const wanted = given === undefined ? (BAND_MODES[(BAND_MODES.indexOf(band) + 1) % BAND_MODES.length] ?? 'closed') : bandMode(given)
-      const failed = await setOption($, 'band', wanted)
-      return { text: failed ? `Could not set band: ${failed}` : `Band above the prompt: ${BAND_LABELS[wanted]}.` }
+    if (verb === 'layout' || verb === 'band') {
+      // Without an argument the layouts cycle; the old band words still land on their layout.
+      const given = rest[0]
+      const wanted: Layout | undefined =
+        given === undefined
+          ? (LAYOUTS[(LAYOUTS.indexOf(layout) + 1) % LAYOUTS.length] ?? 'auto')
+          : (LAYOUTS as readonly string[]).includes(given)
+            ? (given as Layout)
+            : given === 'on'
+              ? 'auto'
+              : OLD_BAND[given]
+      if (!wanted) return { text: `Layouts: ${LAYOUTS.map(one => `${one} (${LAYOUT_LABELS[one]})`).join(', ')}` }
+      const failed = await setOption($, 'layout', wanted)
+      return { text: failed ? `Could not set the layout: ${failed}` : `Layout: ${LAYOUT_LABELS[wanted]}.` }
     }
     if (verb === 'theme') {
       const name = rest[0]
@@ -1194,17 +1212,17 @@ export const register: Register = (on, options) => {
               />
             )
           })()}
-          <Text dimColor>Band</Text>
+          <Text dimColor>Layout</Text>
           {(() => {
             const { Select } = $.ui.resolve(e)
             return (
               <Select
-                key="band"
-                value={band}
-                options={BAND_MODES.map(mode => ({ value: mode, label: BAND_LABELS[mode] }))}
+                key="layout"
+                value={layout}
+                options={LAYOUTS.map(one => ({ value: one, label: LAYOUT_LABELS[one] }))}
                 onSelect={value =>
-                  void setOption($, 'band', value).then(failed => {
-                    if (failed) $.ui.toast(`Could not set band: ${failed}`)
+                  void setOption($, 'layout', value).then(failed => {
+                    if (failed) $.ui.toast(`Could not set the layout: ${failed}`)
                   })
                 }
               />

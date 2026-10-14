@@ -7,10 +7,11 @@ type Engine = Parameters<Body>[0]
 type On = Parameters<Body>[1]
 
 /** What the kit leaves unanswered beneath the plugin: the clock, the store, the session id, the status line and the pane. */
-function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeof mock.clock>; toasts: string[] } {
+function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeof mock.clock>; toasts: string[]; opens: string[] } {
   const clock = mock.clock(on)
   const stored = new Map<string, unknown>()
   const toasts: string[] = []
+  const opens: string[] = []
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -31,10 +32,13 @@ function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeo
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
-  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.open', (_$, e) => {
+    opens.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
   // The poll of a shared board never fires here: the mock clock stands still, and a test writes
   // the store itself in another session's stead.
-  return { stored, clock, toasts }
+  return { stored, clock, toasts, opens }
 }
 
 /** The lists as the tool renders them for the model: the pane's text, one line per list and item. */
@@ -309,6 +313,42 @@ test('a change the person makes is told to the model as a note; the agent\'s own
   await $.command.run({ command: 'todo', args: 'add Review it' })
   const notes = noteTexts().filter(text => text.startsWith('session-todo:'))
   expect(notes).toEqual(['session-todo: the person marked "Ship" (b) done.', 'session-todo: the person added "Review it" to the main list as their own item.'])
+})
+
+test('the pane opens on its own at the first items in the auto layout', async ($, on) => {
+  const { opens } = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'read' })
+  expect(opens).toEqual([])
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'main', title: 'Plan', items: [{ text: 'Build' }] })
+  expect(opens).toEqual(['session-todo'])
+  await $.tool.call({ tool: TOOL, action: 'add', text: 'Ship' })
+  expect(opens).toHaveLength(1)
+})
+
+test('the band-only layout never opens the pane on its own, only when asked', { options: { layout: 'band' } }, async ($, on) => {
+  const { opens } = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'main', title: 'Plan', items: [{ text: 'Build' }] })
+  await $.tool.call({ tool: TOOL, action: 'add', text: 'Ship' })
+  expect(opens).toEqual([])
+  await $.command.run({ command: 'todo', args: '' })
+  expect(opens).toEqual(['session-todo'])
+})
+
+test('/todo layout cycles and accepts the old band words', async ($, on) => {
+  engine(on)
+  const rows = [{ key: 'session-todo@inline.layout', value: 'auto' }]
+  on('config.list', () => ({ value: rows }))
+  const set: Array<{ key: string; value: unknown }> = []
+  on('config.set', (_$, e) => {
+    set.push({ key: e.key, value: e.value })
+    return { value: e.value }
+  })
+  expect((await $.command.run({ command: 'todo', args: 'layout' })).text).toBe('Layout: band and pane.')
+  expect((await $.command.run({ command: 'todo', args: 'layout pane' })).text).toBe('Layout: pane only.')
+  expect((await $.command.run({ command: 'todo', args: 'band always' })).text).toBe('Layout: band and pane.')
+  expect((await $.command.run({ command: 'todo', args: 'layout sideways' })).text).toContain('Layouts: auto (auto), both (band and pane)')
+  expect(set.map(one => one.value)).toEqual(['both', 'pane', 'both'])
+  expect(set.every(one => one.key === 'session-todo@inline.layout')).toBe(true)
 })
 
 test('notify off keeps the toast away', { options: { notify: false } }, async ($, on) => {

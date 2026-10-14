@@ -1,6 +1,6 @@
 {
   "name": "session-todo",
-  "version": "0.2.31",
+  "version": "0.2.32",
   "description": "A live todo pane for the session: the agent keeps it current through a tool, you read and tick it without asking.",
   "author": { "name": "Jesper Sahlin", "url": "https://github.com/jepperip" },
   "types": "./types/index.d.ts",
@@ -18,12 +18,12 @@
       "description": "Drop the blank line between items in the Todo pane.",
       "default": false
     },
-    "band": {
+    "layout": {
       "type": "string",
-      "title": "Band above the prompt",
-      "description": "When to show the item in progress and the count in a row above the prompt, with a button that opens the pane: off, closed (only while the Todo pane is closed), or always.",
-      "default": "closed",
-      "options": ["off", "closed", "always"]
+      "title": "Layout",
+      "description": "What shows where. auto: the band above the prompt while the Todo pane is closed, and the pane opens on its own at the first items. both: the band always, the pane as in auto. band: the band always, the pane only when you open it. pane: no band, the pane as in auto.",
+      "default": "auto",
+      "options": ["auto", "both", "band", "pane"]
     },
     "notify": {
       "type": "boolean",
