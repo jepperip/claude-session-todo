@@ -292,6 +292,25 @@ test('the agent finishing a step that puts one of the person\'s up next pokes th
   expect(toasts).toEqual(['♟ needs you: Click deploy'])
 })
 
+test('a change the person makes is told to the model as a note; the agent\'s own changes are not', async ($, on) => {
+  engine(on)
+  const session = mock.session(on)
+  const noteTexts = () =>
+    session.appended().map(row => {
+      const content = row.message.content
+      const first = Array.isArray(content) ? content[0] : undefined
+      return first && typeof first === 'object' && 'text' in first ? String(first.text) : String(content)
+    })
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'main', title: 'Plan', items: [{ id: 'a', text: 'Build' }, { id: 'b', text: 'Ship' }] })
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'a', status: 'done' })
+  expect(noteTexts().filter(text => text.startsWith('session-todo:'))).toEqual([])
+
+  await $.command.run({ command: 'todo', args: 'done 2' })
+  await $.command.run({ command: 'todo', args: 'add Review it' })
+  const notes = noteTexts().filter(text => text.startsWith('session-todo:'))
+  expect(notes).toEqual(['session-todo: the person marked "Ship" (b) done.', 'session-todo: the person added "Review it" to the main list as their own item.'])
+})
+
 test('notify off keeps the toast away', { options: { notify: false } }, async ($, on) => {
   const { toasts } = engine(on)
   await $.tool.call({ tool: TOOL, action: 'write', list: 'main', title: 'Plan', items: [{ id: 'a', text: 'Build', status: 'in_progress' }] })

@@ -281,8 +281,20 @@ const PROMPT_SECTION = {
     '- Before reporting a task finished, leave its list true: every item done, items that fell away removed. A stale list is worse than none.',
     '- After a context compaction, call read to recover the lists.',
     '- A shared board (the person joined one with /todo share or /todo join; every tool result then says so) is written by other sessions too: add your items with add or in a list of your own, report progress with update, and never write a list you did not create, since write replaces its items.',
+    '- When the person changes the board themselves (a click in the pane, a /todo command), a short "session-todo:" note tells you so. It needs no reply; take it into account when it changes your next step, for instance an item of yours they marked done or one they added.',
   ].join('\n'),
 } as const
+
+/** The words a note to the model uses for a status the person set. */
+const STATUS_WORD: Record<TodoStatus, string> = { pending: 'pending again', in_progress: 'in progress', done: 'done', blocked: 'blocked' }
+
+/**
+ * Tells the model what the person just did to the board: a user-role row they do not see typed,
+ * read on the model's next step, so a tick in the pane reaches the agent without a prompt.
+ */
+async function tell($: EngineInterface, what: string): Promise<void> {
+  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: `session-todo: the person ${what}` }] } })
+}
 
 function isValidName(name: string): boolean {
   return /^[a-z0-9][a-z0-9_-]{0,31}$/i.test(name)
@@ -814,8 +826,12 @@ function drawBoard($: EngineInterface, ui: BoardElements, todo: TodoBoard, { the
   const waiting = waitingOnYou(todo)
   // The bar sits in the title row, so it stays short: a sixth of the width, between 8 and 18 cells.
   const barWidth = Math.max(4, Math.round(Math.min(18, Math.max(8, Math.round(bodyColumns / 6))) * (theme.barScale ?? 1)))
-  const toggle = (item: TodoItem) => () =>
-    void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status: nextStatus(one.status) })), true)
+  const toggle = (item: TodoItem) => () => {
+    const status = nextStatus(item.status)
+    void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status })), true).then(outcome => {
+      if (typeof outcome !== 'string') void tell($, `marked "${item.text}" (${item.id}) ${STATUS_WORD[status]} in the pane.`)
+    })
+  }
 
   let n = 0
   return [
@@ -1076,11 +1092,16 @@ export const register: Register = (on, options) => {
       const text = rest.join(' ')
       if (!text) return { text: 'Usage: /todo add [@list] <text>' }
       const outcome = await commit($, todo => applyTool(todo, { action: 'add', list, text, owner: 'user' }), true)
-      if (typeof outcome !== 'string') await openPane($)
+      if (typeof outcome !== 'string') {
+        await openPane($)
+        await tell($, `added "${text}" to the ${list ?? outcome.active ?? DEFAULT_LIST} list as their own item.`)
+      }
       return shown(outcome)
     }
     if (verb === 'clear' || verb === 'drop' || verb === 'focus') {
-      return shown(await commit($, todo => applyTool(todo, { action: verb, list: rest[0] }), true))
+      const outcome = await commit($, todo => applyTool(todo, { action: verb, list: rest[0] }), true)
+      if (typeof outcome !== 'string' && verb !== 'focus') await tell($, verb === 'clear' ? `cleared the ${rest[0] ?? 'whole'} list.` : `dropped the ${rest[0]} list.`)
+      return shown(outcome)
     }
     if (verb === 'about') {
       const [list, ...words] = rest
@@ -1094,19 +1115,16 @@ export const register: Register = (on, options) => {
       const arg = rest.join(' ')
       const target = byNumber(todo, arg)
       if (!target) return { text: `No item ${arg || '(none)'}. Items are numbered as the pane shows them.` }
-      return shown(
-        await commit(
-          $,
-          todo =>
-            applyTool(
-              todo,
-              verb === 'remove'
-                ? { action: 'remove', id: target.id }
-                : { action: 'update', id: target.id, status: verb === 'start' ? 'in_progress' : 'done' },
-            ),
-          true,
-        ),
+      const status: TodoStatus = verb === 'start' ? 'in_progress' : 'done'
+      const outcome = await commit(
+        $,
+        todo => applyTool(todo, verb === 'remove' ? { action: 'remove', id: target.id } : { action: 'update', id: target.id, status }),
+        true,
       )
+      if (typeof outcome !== 'string') {
+        await tell($, verb === 'remove' ? `removed "${target.text}" (${target.id}) from the list.` : `marked "${target.text}" (${target.id}) ${STATUS_WORD[status]}.`)
+      }
+      return shown(outcome)
     }
     if (verb === 'share' || verb === 'join') {
       const { name, label } = nameAndLabel(rest)
