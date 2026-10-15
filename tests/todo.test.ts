@@ -28,6 +28,7 @@ function engine(on: On): { stored: Map<string, unknown>; clock: ReturnType<typeo
   on('store.keys', () => ({ value: [...stored.keys()] }))
   on('session.id', () => ({ value: 'test-session' }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', () => ({ sessionId: 'test-session' }))
   on('tool.register', (_$, e) => ({ value: { tool: e.name } }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('ui.status', () => ({ value: undefined }))
@@ -356,4 +357,91 @@ test('notify off keeps the toast away', { options: { notify: false } }, async ($
   await $.tool.call({ tool: TOOL, action: 'write', list: 'main', title: 'Plan', items: [{ id: 'a', text: 'Build', status: 'in_progress' }] })
   await $.tool.call({ tool: TOOL, action: 'update', id: 'a', status: 'blocked' })
   expect(toasts).toEqual([])
+})
+
+test('add never reuses an id a write gave in the generated form', async ($, on) => {
+  engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'a', items: [{ text: 'One' }] })
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'b', items: [{ id: 't2', text: 'Two' }, { id: 't3', text: 'Three' }] })
+  await $.tool.call({ tool: TOOL, action: 'add', list: 'a', text: 'Four' })
+  const ids = idsIn(await shown($))
+  expect(ids).toHaveLength(4)
+  expect(new Set(ids).size).toBe(4)
+  expect(ids).toContain('t4')
+})
+
+test('a write that reuses an id keeps the item’s owner, note and signature unless given anew', async ($, on) => {
+  const { stored } = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'main', items: [{ id: 'a', text: 'Build' }] })
+  await $.command.run({ command: 'todo', args: 'add Approve it' })
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'a', note: 'needs the key' })
+  const theirs = /Approve it [(]([^)]+)[)] .yours./.exec(await shown($))?.[1]
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'main', items: [{ id: 'a', text: 'Build', status: 'done' }, { id: theirs, text: 'Approve it' }, { text: 'Ship' }] })
+  const text = await shown($)
+  expect(text).toContain(`[x] 1. Build (a) — needs the key`)
+  expect(text).toContain(`2. Approve it (${theirs}) [yours]`)
+  // On a shared board the signature of an unmoved item survives a rewrite by its own session.
+  await $.command.run({ command: 'todo', args: 'share plan as me' })
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'a', status: 'in_progress' })
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'main', items: [{ id: 'a', text: 'Build', status: 'in_progress' }] })
+  const published = stored.get('shared:plan') as { lists: Array<{ items: Array<{ id: string; by?: string }> }> }
+  expect(published.lists[0]?.items[0]).toMatchObject({ id: 'a', by: 'me' })
+})
+
+test('the band and the toast take the next item from the active list, as the pane numbers it', async ($, on) => {
+  const { toasts } = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'first', items: [{ id: 'b', text: 'Busy', status: 'in_progress' }, { id: 'f', text: 'Later', owner: 'user' }] })
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'second', items: [{ id: 's', text: 'Now' }] })
+  await $.tool.call({ tool: TOOL, action: 'focus', list: 'second' })
+  expect(toasts).toEqual([])
+  // With nothing in progress the next pending item is the active list's "Now", drawn first, not
+  // the person's "Later" in the list created first: no poke.
+  await $.tool.call({ tool: TOOL, action: 'update', id: 'b', status: 'done' })
+  expect(toasts).toEqual([])
+})
+
+test('/todo done takes a plain number only; an id that starts with digits is an id', async ($, on) => {
+  engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', items: [{ id: '1b', text: 'One' }, { id: 'two', text: 'Two' }] })
+  await $.command.run({ command: 'todo', args: 'done 1b' })
+  await $.command.run({ command: 'todo', args: 'start 2' })
+  const text = await shown($)
+  expect(text).toContain('[x] 1. One (1b)')
+  expect(text).toContain('[>] 2. Two (two)')
+})
+
+test('/todo share as <label> shares under the board’s own name', async ($, on) => {
+  const { stored } = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', board: 'plan', items: [{ text: 'One' }] })
+  const { text } = await $.command.run({ command: 'todo', args: 'share as backend' })
+  expect(text).toContain('Shared board "plan" (this session signs as "backend")')
+  expect(stored.has('shared:plan')).toBe(true)
+})
+
+test('/todo add @ with no list name lands on the active list and the note names it', async ($, on) => {
+  engine(on)
+  const session = mock.session(on)
+  await $.tool.call({ tool: TOOL, action: 'write', list: 'Work', items: [{ text: 'One' }] })
+  const { text } = await $.command.run({ command: 'todo', args: 'add @ Two' })
+  expect(text).toContain('[Work] (active) 0/2 done')
+  const note = session.appended().map(row => JSON.stringify(row.message.content)).find(one => one.includes('session-todo:'))
+  expect(note).toContain('to the Work list')
+})
+
+test('a resume follows a stored board again, with a label filled in where the record has none', async ($, on) => {
+  const { stored } = engine(on)
+  stored.set('shared:plan', { lists: [{ name: 'plan', title: 'plan', items: [{ id: 'p1', text: 'Step', status: 'pending' }] }], nextId: 2 })
+  stored.set('follow:test-session', { name: 'plan' })
+  await $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true })
+  expect(await shown($)).toContain('Shared board "plan" (this session signs as "test-s")')
+})
+
+test('/clear drops the stored mirror so a start under the same id does not bring the board back', async ($, on) => {
+  const { stored } = engine(on)
+  await $.tool.call({ tool: TOOL, action: 'write', items: [{ text: 'One' }] })
+  expect(stored.has('board:test-session')).toBe(true)
+  await $.session.end({ reason: 'clear' })
+  expect(stored.has('board:test-session')).toBe(false)
+  await $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true })
+  expect(await shown($)).toContain('Todo: no lists')
 })

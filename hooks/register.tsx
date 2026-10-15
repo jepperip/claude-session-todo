@@ -186,11 +186,6 @@ function barSegments(items: readonly TodoItem[], width: number): BarSegment[] {
   return shares.map(({ status, cells }) => ({ status, cells }))
 }
 
-function percentDone(items: readonly TodoItem[]): number {
-  if (items.length === 0) return 0
-  return Math.round((items.filter(item => item.status === 'done').length / items.length) * 100)
-}
-
 /** The longest `about` line a list may carry: one short sentence, never a paragraph. */
 const ABOUT_MAX = 80
 
@@ -318,6 +313,11 @@ function allItems(todo: TodoBoard): TodoItem[] {
   return todo.lists.flatMap(list => list.items)
 }
 
+/** Every item in the order the pane numbers them: the active list first, then creation order. */
+function drawnItems(todo: TodoBoard): TodoItem[] {
+  return drawn(todo).flatMap(list => list.items)
+}
+
 function itemById(todo: TodoBoard, id: string | undefined): TodoItem | undefined {
   return id ? allItems(todo).find(item => item.id === id) : undefined
 }
@@ -327,7 +327,7 @@ function itemById(todo: TodoBoard, id: string | undefined): TodoItem | undefined
  * it waits on them), and their own that are up: in progress, or next when nothing is in progress.
  */
 function waitingOnYou(todo: TodoBoard): TodoItem[] {
-  const items = allItems(todo)
+  const items = drawnItems(todo)
   const waiting = items.filter(item => item.status === 'blocked' || (item.owner === 'user' && item.status === 'in_progress'))
   if (!items.some(item => item.status === 'in_progress')) {
     const next = items.find(item => item.status === 'pending')
@@ -415,6 +415,13 @@ function sharedKey(name: string): string {
   return `${SHARED_PREFIX}${name}`
 }
 
+/** The follow record as stored, with a label filled in where an older record has none. */
+function asFollow(value: unknown, sessionId: string): SharedBoard | undefined {
+  const held = value as Partial<SharedBoard> | undefined
+  if (!held || typeof held.name !== 'string' || !isValidName(held.name)) return undefined
+  return { name: held.name, label: labelOf(typeof held.label === 'string' ? held.label : undefined, sessionId) }
+}
+
 function asBoard(value: unknown): TodoBoard | undefined {
   const held = value as TodoBoard | undefined
   return held && Array.isArray(held.lists) ? held : undefined
@@ -481,8 +488,9 @@ function labelOf(given: string | undefined, sessionId: string): string {
 
 /** `<name> [as <label>]`, as /todo share and /todo join take it. */
 function nameAndLabel(words: string[]): { name: string | undefined; label: string | undefined } {
+  // `as` at the front is the label's keyword too: `/todo share as backend` shares under the board's own name.
   const at = words.indexOf('as')
-  return { name: words[0], label: at > 0 ? words.slice(at + 1).join(' ') : undefined }
+  return { name: at === 0 ? undefined : words[0], label: at >= 0 ? words.slice(at + 1).join(' ') : undefined }
 }
 
 /** The poll of the shared board; a hot reload cancels it, and session.start arms it again. */
@@ -678,8 +686,8 @@ function setTheme($: EngineInterface, name: string): Promise<string | undefined>
 
 /** Opens the pane because the person asked: a command, a button on the band. */
 async function openPane($: EngineInterface): Promise<void> {
-  const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
-  if (!isUp) await $.ui.open({ id: PANE, title: 'Todo' })
+  // A pane that is placed but hidden (another pane in front of it) is opened again too.
+  if (!(await isPaneShown($))) await $.ui.open({ id: PANE, title: 'Todo' })
   await update($, paneAutoOpened, () => true)
   redraw($)
 }
@@ -717,8 +725,13 @@ function applyTool(todo: TodoBoard, input: TodoBoardInput): TodoBoard | string {
           while (taken.has(id))
         }
         taken.add(id)
-        const item: TodoItem = { id, text: given.text, status: given.status ?? 'pending', owner: given.owner ?? 'agent' }
-        if (given.note) item.note = given.note
+        // An id reused from the list being rewritten keeps that item in place: what the call
+        // leaves out (owner, note, signature) carries over rather than resetting.
+        const kept = existing?.items.find(item => item.id === id)
+        const item: TodoItem = { id, text: given.text, status: given.status ?? 'pending', owner: given.owner ?? kept?.owner ?? 'agent' }
+        const note = given.note ?? kept?.note
+        if (note) item.note = note
+        if (kept?.by) item.by = kept.by
         items.push(item)
       }
       const about = aboutOf(input.about, existing?.about)
@@ -739,14 +752,20 @@ function applyTool(todo: TodoBoard, input: TodoBoardInput): TodoBoard | string {
         target = { name, title: name, items: [] }
         lists = [...lists, target]
       }
-      const item: TodoItem = { id: `t${todo.nextId}`, text: input.text, status: input.status ?? 'pending', owner: input.owner ?? 'agent' }
+      // A written list may hold an id of the generated form (t5) that nextId has not passed yet.
+      const taken = new Set(allItems(todo).map(item => item.id))
+      let nextId = todo.nextId
+      let id: string
+      do id = `t${nextId++}`
+      while (taken.has(id))
+      const item: TodoItem = { id, text: input.text, status: input.status ?? 'pending', owner: input.owner ?? 'agent' }
       if (input.note) item.note = input.note
       const added = target
       return {
         ...todo,
         lists: lists.map(list => (list === added ? { ...list, items: [...list.items, item] } : list)),
         active: todo.active ?? added.name,
-        nextId: todo.nextId + 1,
+        nextId,
       }
     }
     case 'update': {
@@ -836,9 +855,9 @@ function numberOf(todo: TodoBoard, item: TodoItem): number {
 
 /** An item by its number in the pane (counted across lists in drawn order) or by id. */
 function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
-  const items = drawn(todo).flatMap(list => list.items)
-  const n = Number.parseInt(arg, 10)
-  if (Number.isFinite(n) && n >= 1 && n <= items.length) return items[n - 1]
+  const items = drawnItems(todo)
+  const n = /^[0-9]+$/.test(arg) ? Number(arg) : Number.NaN
+  if (Number.isInteger(n) && n >= 1 && n <= items.length) return items[n - 1]
   return items.find(item => item.id === arg)
 }
 
@@ -1019,9 +1038,9 @@ export const register: Register = (on, options) => {
     })
 
     const sessionId = await $.session.id()
-    const following = (await $.store.get(followKey(sessionId))) as SharedBoard | undefined
-    const saved = following?.name ? await loadShared($, following.name) : asBoard(await $.store.get(storeKey(sessionId)))
-    if (following?.name) await follow($, following, saved ?? EMPTY)
+    const following = asFollow(await $.store.get(followKey(sessionId)), sessionId)
+    const saved = following ? await loadShared($, following.name) : asBoard(await $.store.get(storeKey(sessionId)))
+    if (following) await follow($, following, saved ?? EMPTY)
     else if (saved) await update($, board, () => saved)
     await prune($, sessionId, following?.name)
     watchFocus($)
@@ -1037,6 +1056,8 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear') {
       if (await read($, shared)) await unfollow($)
       await update($, board, () => EMPTY)
+      // The mirror goes too, so a session.start under the same id does not bring the board back.
+      await $.store.delete(storeKey(await $.session.id()))
     }
     return next(e)
   })
@@ -1050,7 +1071,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (layout === 'pane' || e.props.hasSurvey) return next(e)
     const todo = await read($, board)
-    const items = allItems(todo)
+    const items = drawnItems(todo)
     if (items.length === 0 || (layout === 'auto' && (await isPaneShown($)))) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -1178,13 +1199,14 @@ export const register: Register = (on, options) => {
       return { text: render(todo, following) }
     }
     if (verb === 'add') {
-      const list = rest[0]?.startsWith('@') ? rest.shift()?.slice(1) : undefined
+      const list = rest[0]?.startsWith('@') ? rest.shift()?.slice(1) || undefined : undefined
       const text = rest.join(' ')
       if (!text) return { text: 'Usage: /todo add [@list] <text>' }
       const outcome = await commit($, todo => applyTool(todo, { action: 'add', list, text, owner: 'user' }), true)
       if (typeof outcome !== 'string') {
         await openPane($)
-        await tell($, `added "${text}" to the ${list ?? outcome.active ?? DEFAULT_LIST} list as their own item.`)
+        const into = list ? (listNamed(outcome, list)?.name ?? list) : (outcome.active ?? DEFAULT_LIST)
+        await tell($, `added "${text}" to the ${into} list as their own item.`)
       }
       return shown(outcome)
     }
