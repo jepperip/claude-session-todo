@@ -829,6 +829,11 @@ function fitAbout(about: string | undefined): { about: string | undefined; note?
   return { about: cut, note: `about was ${whole.length} characters and is cut to ${ABOUT_MAX}: "${cut}"` }
 }
 
+/** An item's number in the pane: counted across lists in drawn order, as the rows and the band show it. */
+function numberOf(todo: TodoBoard, item: TodoItem): number {
+  return drawn(todo).flatMap(list => list.items).findIndex(one => one.id === item.id) + 1
+}
+
 /** An item by its number in the pane (counted across lists in drawn order) or by id. */
 function byNumber(todo: TodoBoard, arg: string): TodoItem | undefined {
   const items = drawn(todo).flatMap(list => list.items)
@@ -1054,11 +1059,13 @@ export const register: Register = (on, options) => {
     // With nothing in progress the band names the next pending item, so a freshly added item
     // shows up at once; with nothing pending either, it says so.
     const upcoming = current.length === 0 ? items.find(item => item.status === 'pending') : undefined
+    // Every item is named with its number in the pane, so `/todo done <n>` needs no lookup.
+    const named = (item: TodoItem) => `${numberOf(todo, item)}. ${item.text}`
     const now =
-      current.length > 0
-        ? `TODO: ${current[0]?.text}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
+      current[0]
+        ? `TODO: ${named(current[0])}${current.length > 1 ? ` (+${current.length - 1})` : ''}`
         : upcoming
-          ? `TODO: ${upcoming.text}`
+          ? `TODO: ${named(upcoming)}`
           : 'TODO: nothing left'
 
     const isIdle = current.length === 0 && upcoming === undefined
@@ -1078,17 +1085,18 @@ export const register: Register = (on, options) => {
         : current.length > 0
           ? theme.status.in_progress
           : undefined
+    const finishedItem = finished ? itemById(todo, finished.id) : undefined
     const label = finished
-      ? `DONE: ${finished.text}`
+      ? `DONE: ${finishedItem ? named(finishedItem) : finished.text}`
       : you
-        ? `${you.text}${waiting.length > 1 ? ` (+${waiting.length - 1})` : ''}`
+        ? `${named(you)}${waiting.length > 1 ? ` (+${waiting.length - 1})` : ''}`
         : now
     // The ▸ unfolds the whole board under the row, as the pane draws it; the engine scrolls a
     // tall one in its window. The fold is remembered for the session.
     const isOpen = await read($, bandOpen)
     const fold = () => void update($, bandOpen, open => !open)
     // The glyph is the shown item's own toggle, as in the pane: a click cycles its status.
-    const shown = (finished ? itemById(todo, finished.id) : undefined) ?? you ?? current[0] ?? upcoming
+    const shown = finishedItem ?? you ?? current[0] ?? upcoming
     const cycle = (item: TodoItem) => () => {
       const status = nextStatus(item.status)
       void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status })), true).then(outcome => {
