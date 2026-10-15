@@ -1065,42 +1065,62 @@ export const register: Register = (on, options) => {
     // An item that just went from in progress to done holds the band for a moment, ticked, before
     // the next item takes its place.
     const finished = await read($, justDone)
-    // An item waiting on the person takes the band over everything else, in their colour.
+    // Otherwise an item waiting on the person takes the band over everything else, in their colour.
     const waiting = waitingOnYou(todo)
-    const you = waiting[0]
-    const glyph = you ? GLYPH[you.status] : finished ? GLYPH.done : current.length > 0 ? GLYPH.in_progress : GLYPH.pending
-    const glyphColor = you
-      ? you.status === 'pending'
-        ? undefined
-        : theme.status[you.status]
-      : finished
-        ? theme.status.done
+    const you = finished ? undefined : waiting[0]
+    const glyph = finished ? GLYPH.done : you ? GLYPH[you.status] : current.length > 0 ? GLYPH.in_progress : GLYPH.pending
+    const glyphColor = finished
+      ? theme.status.done
+      : you
+        ? you.status === 'pending'
+          ? undefined
+          : theme.status[you.status]
         : current.length > 0
           ? theme.status.in_progress
           : undefined
-    const label = you
-      ? `${you.text}${waiting.length > 1 ? ` (+${waiting.length - 1})` : ''}`
-      : finished
-        ? `DONE: ${finished.text}`
+    const label = finished
+      ? `DONE: ${finished.text}`
+      : you
+        ? `${you.text}${waiting.length > 1 ? ` (+${waiting.length - 1})` : ''}`
         : now
     // The ▸ unfolds the whole board under the row, as the pane draws it; the engine scrolls a
     // tall one in its window. The fold is remembered for the session.
     const isOpen = await read($, bandOpen)
     const fold = () => void update($, bandOpen, open => !open)
+    // The glyph is the shown item's own toggle, as in the pane: a click cycles its status.
+    const shown = (finished ? itemById(todo, finished.id) : undefined) ?? you ?? current[0] ?? upcoming
+    const cycle = (item: TodoItem) => () => {
+      const status = nextStatus(item.status)
+      void commit($, todo => mapItem(todo, item.id, one => ({ ...one, status })), true).then(outcome => {
+        if (typeof outcome !== 'string') void tell($, `marked "${item.text}" (${item.id}) ${STATUS_WORD[status]} on the band.`)
+      })
+    }
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between" gap={2}>
-          <Box flexDirection="row" gap={1} minWidth={0}>
-            <Text bold color={glyphColor} dimColor={isIdle && !finished && !you}>
-              {glyph}
-            </Text>
+          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1} overflow="hidden">
+            {/* The desktop draws a button's text in its own style, so the coloured moments (the
+                green tick, the idle grey) are plain text; a button only where a click does something. */}
+            {shown && !finished ? (
+              <Button plain key={`band-toggle:${shown.id}`} label={glyph} onPress={cycle(shown)} />
+            ) : (
+              <Text bold color={glyphColor} dimColor={isIdle && !finished}>
+                {glyph}
+              </Text>
+            )}
             {you && <Text bold color={USER_MARK_COLOR}>TODO YOU:</Text>}
-            {isIdle && !finished && !you ? (
+            {finished ? (
+              <Text color={theme.status.done} wrap="truncate-end">
+                {label}
+              </Text>
+            ) : isIdle && !you ? (
               <Text wrap="truncate-end" dimColor>
                 {label}
               </Text>
             ) : (
-              <Button plain key="open-current" label={label} onPress={fold} />
+              <Box minWidth={0} flexShrink={1} overflow="hidden">
+                <Button plain key="open-current" label={label} onPress={fold} />
+              </Box>
             )}
           </Box>
           <Box flexDirection="row" gap={1} flexShrink={0}>
