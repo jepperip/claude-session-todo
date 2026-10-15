@@ -626,9 +626,16 @@ async function commit($: EngineInterface, change: (todo: TodoBoard) => TodoBoard
  * Resolves to the reason when the write did not happen.
  */
 async function setOption($: EngineInterface, field: string, value: string | boolean): Promise<string | undefined> {
-  const rows = await $.config.list()
-  const row = rows.find(one => one.key === `session-todo.${field}` || /^session-todo@[^.]+\.(.+)$/.exec(one.key)?.[1] === field)
-  if (!row) return `no "${field}" row in /config for this plugin (rows: ${rows.length})`
+  // The rows are cached across a hot reload of this plugin, so a field the manifest gained since
+  // the session started is missing from them until the cache is dropped.
+  const isOwn = (key: string) => key === `session-todo.${field}` || /^session-todo@[^.]+\.(.+)$/.exec(key)?.[1] === field
+  let rows = await $.config.list()
+  if (!rows.some(one => isOwn(one.key))) {
+    $.ui.invalidate('config.describe')
+    rows = await $.config.list()
+  }
+  const row = rows.find(one => isOwn(one.key))
+  if (!row) return `no "${field}" row in /config for this plugin (rows: ${rows.length}); a restart of Claude Code lists it`
   try {
     const set = await $.config.set({ key: row.key, value })
     return set.deny
