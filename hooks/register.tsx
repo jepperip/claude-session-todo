@@ -45,7 +45,11 @@ const USER_MARK = '♟'
 const AGENT_MARK_COLOR = '#c97b4a'
 const USER_MARK_COLOR = '#d4b24c'
 
-const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  ${AGENT_MARK} Claude's  ${USER_MARK} yours  · click a glyph to cycle`
+/** The copy button at the end of each row while the pane holds the keyboard; a press puts the item's text and note on the clipboard. */
+const COPY_MARK = '⧉'
+const COPY_COLOR = '#777777'
+
+const LEGEND = `${GLYPH.pending} pending  ${GLYPH.in_progress} in progress  ${GLYPH.done} done  ${GLYPH.blocked} blocked  ${AGENT_MARK} Claude's  ${USER_MARK} yours  · click a glyph to cycle, ${COPY_MARK} to copy`
 
 /** The speech bubble and the figure under it, drawn at the bottom of the pane on Fridays. */
 const FRIDAY_BUBBLE = ['╭──────────────────────╮', '│ have a nice weekend! │', '╰─┬────────────────────╯']
@@ -578,6 +582,30 @@ async function isPaneShown($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
 }
 
+async function isPaneFocused($: EngineInterface): Promise<boolean> {
+  return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isFocused)
+}
+
+/** How often the pane's focus is read back, since no event says when a click gives it the keyboard. */
+const FOCUS_POLL_MS = 300
+let focusWatch: Timer | undefined
+let wasFocused = false
+
+/**
+ * Redraws the pane when it gains or loses the keyboard. On the desktop a click on an unfocused
+ * pane only focuses it, so the copy buttons are drawn only while a click would reach them.
+ */
+function watchFocus($: EngineInterface): void {
+  focusWatch?.cancel()
+  focusWatch = $.clock.every(FOCUS_POLL_MS, () => {
+    void isPaneFocused($).then(focused => {
+      if (focused === wasFocused) return
+      wasFocused = focused
+      redraw($)
+    })
+  })
+}
+
 /** The band above the prompt depends on whether the pane is on screen, which no state read tracks. */
 function redraw($: EngineInterface): void {
   $.ui.invalidate('ui.render')
@@ -831,13 +859,14 @@ function layoutOf(value: unknown, oldBand?: unknown): Layout {
 let layout: Layout = 'auto'
 
 type BoardElements = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'>
-type BoardDrawing = { theme: Theme; isCompact: boolean; bodyColumns: number }
+/** `canCopy`: whether to draw the copy button on each row; only while the site holds the keyboard, since a click on an unfocused pane only focuses it. */
+type BoardDrawing = { theme: Theme; isCompact: boolean; bodyColumns: number; canCopy: boolean }
 
 /**
  * The lists with their items, and the block under them (the items needing the person, the ones
  * in progress), as both the pane and the unfolded band draw them. A glyph click cycles the item.
  */
-function drawBoard($: EngineInterface, ui: BoardElements, todo: TodoBoard, { theme, isCompact, bodyColumns }: BoardDrawing) {
+function drawBoard($: EngineInterface, ui: BoardElements, todo: TodoBoard, { theme, isCompact, bodyColumns, canCopy }: BoardDrawing) {
   const { Box, Text, Button } = ui
   const lists = drawn(todo)
   const current = lists.flatMap(list => list.items).filter(item => item.status === 'in_progress')
@@ -913,6 +942,20 @@ function drawBoard($: EngineInterface, ui: BoardElements, todo: TodoBoard, { the
                     {item.owner === 'user' ? USER_MARK : AGENT_MARK}
                   </Text>
                   {item.by && <Text dimColor>{`@${item.by}`}</Text>}
+                  {canCopy && (
+                    <Button
+                      plain
+                      key={`copy:${item.id}`}
+                      onPress={press => {
+                        const text = item.note ? `${item.text}\r\n${item.note}` : item.text
+                        void $.ui
+                          .copy({ text, surface: press.surface })
+                          .then(copied => $.ui.toast(copied.isCopied ? 'Copied to clipboard' : `Could not copy: ${copied.reason}`))
+                      }}
+                    >
+                      <Text color={COPY_COLOR}>{COPY_MARK}</Text>
+                    </Button>
+                  )}
                 </Box>
                 {item.note && (
                   <Box paddingLeft={4}>
@@ -976,6 +1019,7 @@ export const register: Register = (on, options) => {
     if (following?.name) await follow($, following, saved ?? EMPTY)
     else if (saved) await update($, board, () => saved)
     await prune($, sessionId, following?.name)
+    watchFocus($)
 
     // The pane opens on its own only when there is something to show: a restored board with
     // items. Otherwise the first write (the agent's or /todo add) opens it.
@@ -1067,7 +1111,7 @@ export const register: Register = (on, options) => {
         </Box>
         {isOpen && (
           <Box flexDirection="column" paddingLeft={2} marginTop={1}>
-            {drawBoard($, { Box, Text, Button }, todo, { theme, isCompact, bodyColumns: Math.max(20, e.props.bodyColumns - 2) })}
+            {drawBoard($, { Box, Text, Button }, todo, { theme, isCompact, bodyColumns: Math.max(20, e.props.bodyColumns - 2), canCopy: false })}
           </Box>
         )}
       </Box>
@@ -1199,6 +1243,7 @@ export const register: Register = (on, options) => {
     const isSettingsOpen = await read($, settingsOpen)
     const following = await read($, shared)
     const friday = isFriday(await $.clock.now())
+    const isFocused = await isPaneFocused($)
 
     const settings =
       !isSettingsOpen || e.surface === 'mobile' ? null : (
@@ -1318,7 +1363,7 @@ export const register: Register = (on, options) => {
             {'─'.repeat(Math.max(4, e.props.bodyColumns - 2))}
           </Text>
         </Box>
-        {drawBoard($, { Box, Text, Button }, todo, { theme, isCompact, bodyColumns: e.props.bodyColumns })}
+        {drawBoard($, { Box, Text, Button }, todo, { theme, isCompact, bodyColumns: e.props.bodyColumns, canCopy: isFocused })}
         <Box flexGrow={1} />
         {friday && (
           <Box flexDirection="column" marginTop={1}>
