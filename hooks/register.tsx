@@ -5,6 +5,8 @@ import type { SharedBoard, TodoBoard, TodoItem, TodoList, TodoStatus } from '../
 
 const PANE = 'session-todo'
 const TOOL = 'mcp__session-todo__todo'
+/** The desktop app's own task list, which the app tells the model to keep in place of any other; its calls are mirrored into the main list here. */
+const APP_PLAN_TOOL = 'mcp__ccd_turn__update_plan'
 const COMMAND = 'todo'
 const DEFAULT_LIST = 'main'
 const EMPTY: TodoBoard = { lists: [], nextId: 1 }
@@ -211,6 +213,7 @@ type TodoOwner = NonNullable<TodoItem['owner']>
 
 const TOOL_DESCRIPTION = [
   'The todo lists the user watches in the Todo side pane. They are their view of the plan and of your progress, so keep them current without being asked, also when you do every step yourself.',
+  `Where the host has a task list of its own (${APP_PLAN_TOOL}), every call to it is mirrored into the main list here, so that list needs no second write; call this tool for what the host's list cannot say: a second list, an item the person owns, a blocked step with its note, an about line.`,
   'Lists are named (default "main"); items are addressed by id, unique across lists.',
   '- write: replace one list with its steps (list, title, items, optional about). Do this before the first edit, command or search of any task that takes more than one tool call or spans more than one turn; only a single edit or a question answered from memory needs no list. The first list written becomes the active one, drawn first; focus switches it.',
   '- board (with write): a short name for the whole board, letters, digits, _ and -, such as the ticket or the feature (DAN-1234, release-notes). Give it with the first write of a plan: the pane shares the board under that name with one click. Lists are many, so the board\'s name is its own.',
@@ -279,10 +282,23 @@ const PROMPT_SECTION = {
     '- A list may carry an optional about: one short sentence on what it is for, set when the list is written and then left alone.',
     '- Before reporting a task finished, leave its list true: every item done, items that fell away removed. A stale list is worse than none.',
     '- After a context compaction, call read to recover the lists.',
+    `- Where the host has a task list of its own (${APP_PLAN_TOOL}), keep using it: every call to it is mirrored into the main list here. Call the todo tool for what that list cannot say: a second list, an item the person owns, a blocked step with its note, an about line.`,
     '- A shared board (the person joined one with /todo share or /todo join; every tool result then says so) is written by other sessions too: add your items with add or in a list of your own, report progress with update, and never write a list you did not create, since write replaces its items.',
     '- When the person changes the board themselves (a click in the pane, a /todo command), a short "session-todo:" note tells you so. It needs no reply; take it into account when it changes your next step, for instance an item of yours they marked done or one they added.',
   ].join('\n'),
 } as const
+
+/** The tools whose calls are work the person would want to follow: an edit, a file written, a command run. */
+const WORK_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell'])
+
+/** The work call of a turn at which an empty board earns a note: one edit needs no list, a second says the task has steps. */
+const NUDGE_AT = 2
+
+const NUDGE = `session-todo: the Todo pane is empty while you edit and run commands. Write the plan now, with the ${TOOL} tool (action write, the finished steps already marked done) or with the host's own task list where it has one, and keep it current as you go.`
+
+/** The work calls of the main loop's current turn, and whether the turn has had its note. */
+let workCalls = 0
+let nudged = false
 
 /** The words a note to the model uses for a status the person set. */
 const STATUS_WORD: Record<TodoStatus, string> = { pending: 'pending again', in_progress: 'in progress', done: 'done', blocked: 'blocked' }
@@ -701,6 +717,59 @@ async function autoOpenPane($: EngineInterface): Promise<void> {
   if (layout === 'band') return
   if (await read($, paneAutoOpened)) return
   await openPane($)
+}
+
+/** The arguments of the desktop app's task-list tool: a whole plan, or a step change by position. */
+type AppPlanInput = {
+  items?: Array<{ content?: unknown; status?: unknown }>
+  advance?: unknown
+  done?: unknown
+  start?: unknown
+}
+
+const APP_STATUS: Record<string, TodoStatus> = { pending: 'pending', in_progress: 'in_progress', completed: 'done' }
+
+/**
+ * Applies a call of the app's own task list to the main list: a plan given in full replaces the
+ * list, an item keeping its id (and so its owner and note) when the same text is still there;
+ * `done` and `start` name items by their position in that list, and `advance` finishes the step
+ * in progress and starts the next one still pending. Resolves to the board unchanged when the
+ * call changes nothing it can mirror.
+ */
+function applyAppPlan(todo: TodoBoard, input: AppPlanInput): TodoBoard | string {
+  if (Array.isArray(input.items)) {
+    const existing = listNamed(todo, DEFAULT_LIST)
+    const spare = [...(existing?.items ?? [])]
+    const items: NonNullable<TodoToolInput['items']> = []
+    for (const given of input.items) {
+      if (typeof given?.content !== 'string' || !given.content) continue
+      const kept = spare.findIndex(item => item.text === given.content)
+      const id = kept === -1 ? undefined : spare.splice(kept, 1)[0]?.id
+      const status = typeof given.status === 'string' ? APP_STATUS[given.status] : undefined
+      const item: NonNullable<TodoToolInput['items']>[number] = { text: given.content, status: status ?? 'pending' }
+      if (id) item.id = id
+      items.push(item)
+    }
+    const write: TodoBoardInput = { action: 'write', list: DEFAULT_LIST, items }
+    if (!existing) write.title = 'Plan'
+    return applyTool(todo, write)
+  }
+  const list = listNamed(todo, DEFAULT_LIST)
+  if (!list) return todo
+  const at = (position: unknown) => (typeof position === 'number' ? list.items[position - 1] : undefined)
+  let changed = todo
+  const set = (item: TodoItem | undefined, status: TodoStatus) => {
+    if (item && item.status !== status) changed = mapItem(changed, item.id, one => ({ ...one, status }))
+  }
+  if (input.advance === true) {
+    const current = list.items.filter(item => item.status === 'in_progress')
+    for (const item of current) set(item, 'done')
+    const after = current.length > 0 ? Math.max(...current.map(item => list.items.indexOf(item))) + 1 : 0
+    set(list.items.slice(after).find(item => item.status === 'pending') ?? list.items.find(item => item.status === 'pending'), 'in_progress')
+  }
+  if (Array.isArray(input.done)) for (const position of input.done) set(at(position), 'done')
+  set(at(input.start), 'in_progress')
+  return changed
 }
 
 function applyTool(todo: TodoBoard, input: TodoBoardInput): TodoBoard | string {
@@ -1186,6 +1255,38 @@ export const register: Register = (on, options) => {
     if (action !== 'read') await autoOpenPane($)
     const text = render(outcome, await read($, shared))
     return { result: fitted.note ? `${text}\n(${fitted.note})` : text }
+  })
+
+  // A plan the model never wrote cannot be mirrored or ticked. A turn that is editing and running
+  // commands with nothing on the board gets one note asking for the plan, at its second such
+  // call: a lone edit needs no list. Subagents' calls do not count; the main loop's turn does.
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) {
+      workCalls = 0
+      nudged = false
+    }
+    return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined || nudged || !WORK_TOOLS.has(e.tool)) return next(e)
+    workCalls += 1
+    if (workCalls >= NUDGE_AT && allItems(await read($, board)).length === 0) {
+      nudged = true
+      await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: NUDGE }] } })
+    }
+    return next(e)
+  })
+
+  // The app's system prompt makes its own task list the one the model keeps, so the pane follows
+  // that list rather than waiting for a second write. A shared board is left alone: the main list
+  // there may be another session's, and the model is told to add rather than rewrite on one.
+  on('tool.call', { tool: APP_PLAN_TOOL }, async ($, e, next) => {
+    const answer = await next(e)
+    if (answer.deny !== undefined || (await read($, shared))) return answer
+    const outcome = await commit($, todo => applyAppPlan(todo, e as unknown as AppPlanInput))
+    if (typeof outcome !== 'string' && allItems(outcome).length > 0) await autoOpenPane($)
+    return answer
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {

@@ -15,6 +15,8 @@ A Claude Code mod that puts the session's todo list in a side pane. The agent ke
 - **Fridays:** a small figure with a beer stands at the bottom of the pane and wishes you a nice weekend.
 - **Row spacing:** a blank line between items by default; "Compact rows" in the ⚙ settings row, `/todo compact on|off`, or the `/config` row drops it.
 - **Themes:** `classic` (the terminal's green, yellow, red), `cyberpunk` (neon green and purple), and the standard palettes `dracula`, `nord`, `solarized`, `gruvbox`, `monokai`, `catppuccin`, `tokyo-night`, `one-dark`. Pick one with the ⚙ button at the top of the pane, `/todo theme <name>`, or in `/config` under the plugin's "Theme" row; the choice is stored in your user settings.
+- **The desktop app's own task list is mirrored.** The Claude desktop app shows a task list of its own under the agent's latest message and tells the agent to keep that one in place of any other, so the agent stopped writing the pane. Every call to that list (`mcp__ccd_turn__update_plan`) now lands in the pane's `main` list too: a plan given in full replaces the list, an item keeping its id, owner and note when its text is still there; a step advanced, done or started by position moves the same item here. The agent is told to keep using the app's list and to call the `todo` tool for what that list cannot say: a second list, an item that is yours, a blocked step with its note, an `about` line. A shared board is left alone by the mirror, since its `main` list may be another session's.
+- **A nudge when the plan is missing.** A turn that is editing files or running commands with nothing on the board gets one `session-todo:` note at its second such call, asking the agent to write the plan now (with the `todo` tool, or with the app's own list where there is one) and keep it current. A single edit needs no list, so one call earns no note; subagents' calls do not count.
 - **A `todo` tool** the agent calls (`mcp__session-todo__todo`): `write` a named list, `add`, `update`, `remove`, `read` (every list), `clear`, `drop`, `focus`, `describe` (the `about` line). A system-prompt section tells the agent to write the plan before any task that takes more than one tool call, also when it does every step itself and you only watch, keep the step it works on in progress (one at a time preferred, several allowed), mark items done as it goes, and keep follow-ups such as "open the PR" or "report to Jira" in a second list so the main plan stays focused.
 
 Several lists, two flat levels (list, item), item ids unique across lists. The board lives in the session's plugin state (survives hot reloads and context compaction) and is mirrored to the plugin store under the session id, so `claude --resume` brings it back; a session that followed a shared board follows it again on resume. `/clear` empties it.
@@ -47,8 +49,9 @@ An interactive session watches the folder and reloads the mod when a file change
 .claude-plugin/plugin.json      manifest
 .claude-plugin/marketplace.json makes this repository installable as a marketplace
 hooks/hooks.json                names the hooks module
-hooks/register.tsx              the mod: tool, command, pane, status line, prompt section
+hooks/register.tsx              the mod: tool, command, pane, status line, prompt section, mirror of the app's task list
 types/index.d.ts                the state contract (what the pane draws from)
+types/host-tools.d.ts           the desktop app's task-list tool, typed so the mirror's hook checks
 ```
 
 `claude plugin validate .` checks the manifest and module. The engine writes this build's API declarations to `.claude-plugin/types/` on every load (gitignored), so `tsc -p .` type-checks the module after the mod has loaded once.

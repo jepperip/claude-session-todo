@@ -445,3 +445,119 @@ test('/clear drops the stored mirror so a start under the same id does not bring
   await $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true })
   expect(await shown($)).toContain('Todo: no lists')
 })
+
+const APP_PLAN = 'mcp__ccd_turn__update_plan'
+
+/** The desktop app's own task-list tool, answered beneath the plugin as the app would. */
+function appPlan(on: On): string[] {
+  const calls: string[] = []
+  on('tool.call', { tool: APP_PLAN }, (_$, e) => {
+    calls.push(JSON.stringify({ ...e, tool: undefined, tool_use_id: undefined }))
+    return { result: 'Plan shown.' }
+  })
+  return calls
+}
+
+test('a plan given to the app’s own task list lands in the main list, and the app’s answer is passed through', async ($, on) => {
+  const { opens } = engine(on)
+  const calls = appPlan(on)
+  const answer = await $.tool.call({
+    tool: APP_PLAN,
+    items: [{ content: 'Read the code', status: 'in_progress' }, { content: 'Fix it', status: 'pending' }, { content: 'Test it', status: 'completed' }],
+    scope: 'first_task',
+  })
+  expect(answer.result).toBe('Plan shown.')
+  expect(calls).toHaveLength(1)
+  const text = await shown($)
+  expect(text).toContain('Plan [main] (active) 1/3 done')
+  expect(text).toContain('[>] 1. Read the code (')
+  expect(text).toContain('[ ] 2. Fix it (')
+  expect(text).toContain('[x] 3. Test it (')
+  expect(opens).toContain('session-todo')
+})
+
+test('advance, done and start on the app’s list move the mirrored items by position', async ($, on) => {
+  engine(on)
+  appPlan(on)
+  await $.tool.call({ tool: APP_PLAN, items: [{ content: 'One', status: 'in_progress' }, { content: 'Two', status: 'pending' }, { content: 'Three', status: 'pending' }], scope: 'first_task' })
+  await $.tool.call({ tool: APP_PLAN, advance: true })
+  let text = await shown($)
+  expect(text).toContain('[x] 1. One (')
+  expect(text).toContain('[>] 2. Two (')
+  expect(text).toContain('[ ] 3. Three (')
+  await $.tool.call({ tool: APP_PLAN, done: [2], start: 3 })
+  text = await shown($)
+  expect(text).toContain('[x] 2. Two (')
+  expect(text).toContain('[>] 3. Three (')
+})
+
+test('a plan sent again keeps the ids, owners and notes of the items still in it', async ($, on) => {
+  engine(on)
+  appPlan(on)
+  await $.tool.call({ tool: APP_PLAN, items: [{ content: 'One', status: 'in_progress' }, { content: 'Two', status: 'pending' }], scope: 'first_task' })
+  const before = idsIn(await shown($))
+  await $.tool.call({ tool: TOOL, action: 'update', id: before[1], owner: 'user', note: 'needs a click' })
+  await $.tool.call({ tool: APP_PLAN, items: [{ content: 'Two', status: 'in_progress' }, { content: 'Three', status: 'pending' }], scope: 'continuation' })
+  const text = await shown($)
+  expect(text).not.toContain('One')
+  expect(text).toContain(`[>] 1. Two (${before[1]}) [yours] — needs a click`)
+  expect(text).toContain('[ ] 2. Three (t3)')
+})
+
+test('a plan the app refused is not mirrored', async ($, on) => {
+  engine(on)
+  on('tool.call', { tool: APP_PLAN }, () => ({ deny: 'no plan now' }))
+  const refused = await $.tool.call({ tool: APP_PLAN, items: [{ content: 'One', status: 'pending' }], scope: 'first_task' })
+  expect(refused.deny).toBe('no plan now')
+  expect(await shown($)).toContain('Todo: no lists')
+})
+
+test('a shared board is left alone by the app’s list', async ($, on) => {
+  const { stored } = engine(on)
+  appPlan(on)
+  stored.set('shared:plan', { lists: [{ name: 'main', title: 'main', items: [{ id: 'p1', text: 'Theirs', status: 'pending' }] }], nextId: 2 })
+  stored.set('follow:test-session', { name: 'plan' })
+  await $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: APP_PLAN, items: [{ content: 'Mine', status: 'pending' }], scope: 'first_task' })
+  const text = await shown($)
+  expect(text).toContain('Theirs')
+  expect(text).not.toContain('Mine')
+})
+
+test('a turn that edits and runs commands with an empty board is asked once for the plan; a board with items is not', async ($, on) => {
+  engine(on)
+  const session = mock.session(on)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  const notes = () =>
+    session
+      .appended()
+      .map(row => {
+        const content = row.message.content
+        const first = Array.isArray(content) ? content[0] : undefined
+        return first && typeof first === 'object' && 'text' in first ? String(first.text) : String(content)
+      })
+      .filter(text => text.startsWith('session-todo: the Todo pane is empty'))
+
+  await $.turn.start({ text: 'go', turnId: 'turn-1' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(notes()).toHaveLength(0)
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(notes()).toHaveLength(1)
+  expect(notes()[0]).toContain(TOOL)
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(notes()).toHaveLength(1)
+
+  await $.turn.start({ text: 'next', turnId: 'turn-2' })
+  await $.tool.call({ tool: TOOL, action: 'write', items: [{ text: 'One' }] })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(notes()).toHaveLength(1)
+
+  // A new turn with the board emptied again is asked again.
+  await $.tool.call({ tool: TOOL, action: 'clear' })
+  await $.turn.start({ text: 'again', turnId: 'turn-3' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(notes()).toHaveLength(2)
+})
